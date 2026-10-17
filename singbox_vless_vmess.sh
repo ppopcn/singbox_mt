@@ -36,6 +36,7 @@ BIN_PATH="${INSTALL_DIR}/sing-box"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 REPO="shtorm-7/sing-box-extended"
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+RAW_URL="https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_vless_vmess.sh"
 
 PORT="${PORT:-8989}"
 VMESS_PORT="${VMESS_PORT:-8990}"
@@ -637,6 +638,7 @@ print_summary() {
   printf '  systemctl restart %s   重启\n' "$SERVICE_NAME"
   printf '  journalctl -u %s -f    实时日志\n' "$SERVICE_NAME"
   printf '  bash %s info           重新打印此信息\n' "$(basename "$0")"
+  printf '  远程重跑: curl -fsSL %s | sudo bash -s -- info\n' "$RAW_URL"
   printf '  bash %s uninstall      卸载\n' "$(basename "$0")"
   echo
 }

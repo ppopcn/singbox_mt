@@ -16,21 +16,60 @@
 
 ## 快速开始
 
-```bash
-sudo bash singbox_mt.sh          # MTPROXY
-sudo bash singbox_ssr.sh         # Shadowsocks
-sudo bash singbox_hy2.sh         # Hysteria2
-sudo bash singbox_tuic.sh        # TUIC
-sudo bash singbox_vless_vmess.sh # VLESS + VMess
-```
-
-也支持远程一行执行：
+### 一行执行（复制即用）
 
 ```bash
-curl -fsSL -H 'Cache-Control: no-cache' https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | bash
+# MTPROXY（Telegram）
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_mt.sh | sudo bash
+
+# Shadowsocks aes-256-gcm
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_ssr.sh | sudo bash
+
+# Hysteria2
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | sudo bash
+
+# TUIC v5
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_tuic.sh | sudo bash
+
+# VLESS + VMess
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_vless_vmess.sh | sudo bash
 ```
 
-所有脚本都支持三个子命令：`info`（重新打印凭据与链接）、`uninstall`（卸载）、`help`。
+### 子命令（查看 / 卸载 / 帮助）
+
+把 `singbox_hy2.sh` 换成你要操作的脚本即可：
+
+```bash
+# 重新打印凭据与链接
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | sudo bash -s -- info
+
+# 卸载
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | sudo bash -s -- uninstall
+
+# 卸载但保留配置文件
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | sudo env KEEP_CONFIG=1 bash -s -- uninstall
+
+# 查看帮助
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | sudo bash -s -- help
+```
+
+### 带自定义参数
+
+管道方式不方便传环境变量，先落盘再执行：
+
+```bash
+curl -fsSL -o singbox_hy2.sh https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh
+sudo PORT=8443 DOMAIN=www.bing.com bash singbox_hy2.sh
+```
+
+> 若你的 sudoers 限制了环境变量，改用：`sudo bash -c 'PORT=8443 DOMAIN=www.bing.com bash singbox_hy2.sh'`。
+
+也可以先 `git clone` 后本地执行：
+
+```bash
+git clone https://github.com/ppopcn/singbox_mt.git && cd singbox_mt
+sudo bash singbox_hy2.sh
+```
 
 ## 环境要求
 
@@ -45,6 +84,12 @@ curl -fsSL -H 'Cache-Control: no-cache' https://raw.githubusercontent.com/ppopcn
 ---
 
 # singbox_mt.sh — MTPROXY
+
+一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_mt.sh | sudo bash
+```
 
 提供 Telegram 的 MTProto 代理。官方 sing-box 没有 MTPROXY 入站，这个脚本用的是 `sing-box-extended`，它额外提供了 `mtproxy` 入站（底层是 [mtg-multi](https://github.com/dolonet/mtg-multi) 内核），同时保留 sing-box 全套路由与出站能力。
 
@@ -72,6 +117,12 @@ https://t.me/proxy?server=1.2.3.4&port=443&secret=ee13c2...777772e636c6f7564666c
 
 # singbox_ssr.sh — Shadowsocks (aes-256-gcm)
 
+一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_ssr.sh | sudo bash
+```
+
 > sing-box 没有实现 ShadowsocksR（SSR）协议，本脚本部署的是 **Shadowsocks AEAD `aes-256-gcm`**。客户端请选择 "Shadowsocks"，不要选 "ShadowsocksR"。
 
 单端口 TCP + UDP，输出 SIP002 格式的 `ss://` 链接（`base64url(method:password)@ip:port`）。
@@ -91,6 +142,12 @@ sudo PORT=8443 PASSWORD=mypass bash singbox_ssr.sh
 ---
 
 # singbox_hy2.sh — Hysteria2
+
+一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | sudo bash
+```
 
 QUIC（UDP）入站，自签 TLS 证书 + 可选 salamander 混淆，并带一个伪装站点（`masquerade`）用于抵抗探测。
 
@@ -120,6 +177,12 @@ hysteria2://PASSWORD@1.2.3.4:443/?sni=www.bing.com&insecure=1#hy2-443
 
 # singbox_tuic.sh — TUIC v5
 
+一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_tuic.sh | sudo bash
+```
+
 QUIC（UDP）入站，默认 BBR 拥塞控制，UUID + 密码双认证，同样支持自签或复用已有证书。
 
 ```bash
@@ -145,6 +208,12 @@ tuic://UUID:PASSWORD@1.2.3.4:443?congestion_control=bbr&udp_relay_mode=native&al
 ---
 
 # singbox_vless_vmess.sh — VLESS + VMess
+
+一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_vless_vmess.sh | sudo bash
+```
 
 VLESS 与 VMess 都走 **TLS + WebSocket**，路径分别是 `/vless` 和 `/vmess`。
 

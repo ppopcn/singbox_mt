@@ -34,6 +34,7 @@ BIN_PATH="${INSTALL_DIR}/sing-box"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 REPO="shtorm-7/sing-box-extended"
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+RAW_URL="https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_mt.sh"
 
 PORT="${PORT:-443}"
 USER_NAME="${USER_NAME:-user1}"
@@ -527,6 +528,7 @@ print_summary() {
   printf '  %s stop %s       停止\n'  "systemctl" "$SERVICE_NAME"
   printf '  %s -u %s -f     实时日志\n' "journalctl" "$SERVICE_NAME"
   printf '  bash %s info      重新打印此信息\n' "$(basename "$0")"
+  printf '  远程重跑: curl -fsSL %s | sudo bash -s -- info\n' "$RAW_URL"
   printf '  bash %s uninstall 卸载\n' "$(basename "$0")"
   echo
 }
