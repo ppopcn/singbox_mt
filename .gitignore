@@ -19,3 +19,7 @@ Thumbs.db
 
 # 本地工作记忆(不随仓库分发)
 .workbuddy/
+
+# 构建与测试产物
+.build/
+.testout/

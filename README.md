@@ -2,7 +2,9 @@
 
 在 Debian / Ubuntu / Alpine 上**一键部署 MTPROXY 服务端**的 Shell 脚本，基于 [shtorm-7/sing-box-extended](https://github.com/shtorm-7/sing-box-extended)（sing-box 的增强分支）。
 
-运行一条命令，脚本会自动完成：识别发行版与架构 → 下载官方预编译二进制 → 生成 FakeTLS secret → 写配置 → 注册服务 → 启动 → 输出 Telegram 代理链接。
+运行一条命令，脚本会自动完成：识别发行版与架构 → 复用或下载官方预编译二进制 → 生成 FakeTLS secret → 写配置 → 注册服务 → 启动 → 输出 Telegram 代理链接。
+
+同一仓库另有四个协议脚本（Shadowsocks / Hysteria2 / TUIC / VLESS+VMess），与 MTPROXY 共用同一套安装骨架，差别只在协议配置。内核版本被**锁定**在 `v1.14.1-extended-2.7.2`，避免上游改字段后配置失配。
 
 ```bash
 bash singbox_mt.sh
@@ -77,8 +79,17 @@ PORT=8443 DOMAIN=www.apple.com SERVER_ADDR=1.2.3.4 bash singbox_mt.sh
 
 ```bash
 bash singbox_mt.sh info        # 重新打印配置与链接
+bash singbox_mt.sh logs        # 查看最近日志（默认 50 行）
 bash singbox_mt.sh uninstall   # 卸载（KEEP_CONFIG=1 可保留配置）
 bash singbox_mt.sh help        # 查看帮助
+```
+
+安装完成后脚本会把自身装到 `/usr/local/bin/singbox-<协议>`，之后可以直接用本地命令管理，不必再联网：
+
+```bash
+singbox-mt info
+singbox-hy2 logs 100
+singbox-tuic uninstall
 ```
 
 ## 其他协议脚本
@@ -92,7 +103,7 @@ bash singbox_mt.sh help        # 查看帮助
 | `singbox_tuic.sh` | TUIC v5（QUIC） | `443/udp` | `tuic://` |
 | `singbox_vless_vmess.sh` | VLESS + VMess（TLS+WS） | `8989` + `8990` | `vless://`、`vmess://` |
 
-四个脚本都支持 `install`（默认）/ `info` / `uninstall` / `help`，也可一行部署：
+四个脚本都支持 `install`（默认）/ `info` / `logs` / `uninstall` / `help`，也可一行部署：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | sudo bash
@@ -100,7 +111,7 @@ curl -fsSL .../singbox_hy2.sh | sudo bash -s -- info
 curl -fsSL .../singbox_hy2.sh | sudo bash -s -- uninstall
 ```
 
-> 这四个脚本目前用 **systemd** 托管，仅支持 Debian / Ubuntu 系；Alpine / OpenRC 支持目前只在 `singbox_mt.sh` 上实现。
+> 五个脚本共用同一套公共层，Debian / Ubuntu 走 systemd、Alpine 走 OpenRC 都由它统一处理（MTPROXY 已在 Alpine 容器实测，其余协议复用同一实现）。
 
 ### singbox_ssr.sh — Shadowsocks
 
@@ -227,6 +238,49 @@ vmess://eyJ2IjoiMiIsInBzIjoi...
 
 客户端记得打开「允许不安全证书」。
 
+## 仓库结构
+
+```
+lib/common.sh             公共骨架：日志 / 检查 / 下载 / 版本 / 证书 / 服务 / 端口 / 卸载 / main
+src/singbox_*.sh          各协议差异段：元信息 + render_config + 凭据 + print_summary + usage
+build.sh                  把 src 与 lib 拼成单文件脚本
+singbox_*.sh              构建产物（仓库根目录，也就是 curl 直接跑的那些）
+```
+
+**根目录的 `singbox_*.sh` 不要直接改**，改完 `src/` 或 `lib/` 后重新生成：
+
+```bash
+./build.sh            # 生成 5 个脚本
+./build.sh --check    # 只检查产物是否最新（CI 用）
+```
+
+### 新增一个协议
+
+1. 复制 `src/singbox_tuic.sh` 改名，修改元信息块里的 `SERVICE_NAME` / `SHORT_NAME` / `CONFIG_FILE` / `PORT_SPECS` / `NEED_CERT`；
+2. 实现 `render_config`（输出 JSON 到 stdout）、`prepare_secrets`、`load_credentials`、`print_summary`、`usage`；
+3. 跑 `./build.sh`，根目录会自动多出对应的 `singbox_xxx.sh`。
+
+公共流程（下载 → 校验 → 写配置 → 注册服务 → 放行防火墙 → 启动 → 输出）以及 `info` / `logs` / `uninstall` 全部由 `lib` 提供，不用重复实现。
+
+### 端口声明
+
+端口用 `PORT_SPECS` 声明，公共层据此做校验、占用检测、防火墙放行与监听验证：
+
+```bash
+PORT_SPECS=("PORT:tcp")              # 单端口 TCP
+PORT_SPECS=("PORT:tcp,udp")          # 单端口双协议（Shadowsocks）
+PORT_SPECS=("PORT:udp")              # QUIC 系（Hysteria2 / TUIC）
+PORT_SPECS=("PORT:tcp" "VMESS_PORT:tcp")   # 双入站
+```
+
+协议若需要派生默认值（如 VMess 取 `PORT+1`），实现 `port_defaults_hook`；需要交叉校验（如两端口不能相同）就实现 `port_validate_hook`。
+
+### 内核版本与二进制复用
+
+- 版本锁定在 `SINGBOX_TAG`，默认 `v1.14.1-extended-2.7.2`；要试新版显式覆盖：`SINGBOX_TAG=v1.15.0-extended-2.8.0 sudo bash singbox_tuic.sh`
+- 已装同版本时直接复用，不再下载（装第二个协议不会再拉一遍 20MB）；`FORCE_BIN=1` 强制重下
+- 下载地址与 SHA256 都从该 tag 的 Release 接口取，个别架构只有 glibc / musl 变体（如 loong64）会自动选适配包
+
 ## 部署后
 
 服务名统一为 `singbox-mt`，但管理命令按系统不同：
@@ -326,6 +380,9 @@ MIRROR=https://ghfast.top/https://github.com bash singbox_mt.sh
 - 实际监听成功，启动耗时 `0.00s`，日志无警告
 - Alpine 容器内完整跑通：平台识别 → 依赖检查 → secret 生成 → 配置写入 → OpenRC 服务注册 → 进程监听 → 链接输出
 - OpenRC `stop()` 的 TERM→KILL 降级逻辑单测通过
+- 抽出公共层（`lib/common.sh` + `src/` + `build.sh`）后，五个脚本生成的**配置 JSON 与客户端链接与重构前逐字节一致**
+- 端口推导用例：`PORT=443` → 443/444、默认 → 8989/8990、`PORT=0808` → 808/809、`PORT=abc` / `PORT=70000` 明确报错
+- 同版本二进制复用生效（第二个协议不再下载）、`loong64` 自动选中 `-glibc` 变体
 
 ## 许可
 
