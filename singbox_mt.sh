@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 #
-# singbox_mt.sh - 在 Debian / Ubuntu 上一键部署 sing-box-extended MTPROXY 服务端
+# singbox_mt.sh - 在 Debian / Ubuntu / Alpine 上一键部署 sing-box-extended MTPROXY 服务端
 #
 # 项目: https://github.com/shtorm-7/sing-box-extended
-# 功能: 自动检测架构 -> 下载官方预编译二进制 -> 生成 ee(FakeTLS) secret
-#       -> 写入配置 -> 注册 systemd -> 启动 -> 输出 t.me 代理链接
+# 功能: 自动检测架构与发行版 -> 下载官方预编译二进制 -> 生成 ee(FakeTLS) secret
+#       -> 写入配置 -> 注册服务(systemd / OpenRC) -> 启动 -> 输出 t.me 代理链接
+#
+# 支持系统:
+#   Debian 系  Debian / Ubuntu / 衍生版    服务用 systemd, 包管理 apt
+#   Alpine 系  Alpine Linux                服务用 OpenRC, 包管理 apk
 #
 # 用法:
-#   sudo bash singbox_mt.sh                 # 默认端口 443, 随机 secret
-#   sudo PORT=8443 bash singbox_mt.sh       # 自定义端口
-#   sudo DOMAIN=www.google.com bash singbox_mt.sh   # 自定义伪装域名
-#   sudo bash singbox_mt.sh uninstall       # 卸载
-#   sudo bash singbox_mt.sh info            # 查看当前配置与链接
+#   bash singbox_mt.sh                      # 默认端口 443, 随机伪装域名
+#   PORT=8443 bash singbox_mt.sh            # 自定义端口
+#   DOMAIN=www.google.com bash singbox_mt.sh  # 自定义伪装域名
+#   bash singbox_mt.sh uninstall            # 卸载
+#   bash singbox_mt.sh info                 # 查看当前配置与链接
 #
 # 环境变量:
 #   PORT          监听端口            默认 443
@@ -31,10 +35,8 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/sing-box"
 CONFIG_FILE="${CONFIG_DIR}/mtproxy.json"
 BIN_PATH="${INSTALL_DIR}/sing-box"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 REPO="shtorm-7/sing-box-extended"
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-RAW_URL="https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_mt.sh"
 
 PORT="${PORT:-443}"
 USER_NAME="${USER_NAME:-user1}"
@@ -44,6 +46,11 @@ MIRROR="${MIRROR:-}"
 DOMAIN="${DOMAIN:-}"
 SERVER_ADDR="${SERVER_ADDR:-}"
 AUTO_UPDATE="${AUTO_UPDATE:-0}"
+
+# 由 detect_platform 填充
+OS_FAMILY=""      # debian | alpine | unknown
+INIT_SYSTEM=""    # systemd | openrc
+SERVICE_FILE=""   # 服务定义文件路径
 
 # 伪装域名候选: 需为可正常提供 TLS 1.3 且在国内可直连的大站
 DEFAULT_DOMAINS=(
@@ -74,34 +81,111 @@ check_root() {
   [[ ${EUID} -eq 0 ]] || die "请用 root 运行: sudo bash $0"
 }
 
-check_os() {
-  [[ -r /etc/os-release ]] || warn "未检测到 /etc/os-release, 继续尝试"
+# 识别发行版族与 init 系统, 后续所有平台相关操作都据此分流
+detect_platform() {
+  local id="" id_like="" pretty=""
+
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
-    . /etc/os-release
-    case "${ID:-}" in
-      debian|ubuntu|linuxmint|pop|raspbian|armbian|kali)
-        ok "系统: ${PRETTY_NAME:-$ID}" ;;
-      *)
-        warn "当前系统 ${PRETTY_NAME:-unknown} 非 Debian/Ubuntu 系, 仍尝试继续"
-        ;;
-    esac
+    id="$(. /etc/os-release && printf '%s' "${ID:-}")"
+    id_like="$(. /etc/os-release && printf '%s' "${ID_LIKE:-}")"
+    pretty="$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-}")"
   fi
-  command -v systemctl >/dev/null 2>&1 || die "未找到 systemctl, 无法使用 systemd 托管"
+
+  case "$id" in
+    alpine)
+      OS_FAMILY="alpine" ;;
+    debian|ubuntu|linuxmint|pop|raspbian|armbian|kali|devuan|neon|elementary)
+      OS_FAMILY="debian" ;;
+    *)
+      # 借助 ID_LIKE 兜底
+      if [[ "$id_like" == *alpine* ]]; then
+        OS_FAMILY="alpine"
+      elif [[ "$id_like" == *debian* || "$id_like" == *ubuntu* ]]; then
+        OS_FAMILY="debian"
+      else
+        OS_FAMILY="unknown"
+      fi
+      ;;
+  esac
+
+  case "$OS_FAMILY" in
+    alpine)
+      INIT_SYSTEM="openrc"
+      SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
+      ok "系统: ${pretty:-Alpine Linux} (Alpine 系 / OpenRC)"
+      ;;
+    debian)
+      INIT_SYSTEM="systemd"
+      SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+      ok "系统: ${pretty:-Debian} (Debian 系 / systemd)"
+      ;;
+    *)
+      # 未知系统: 按可用 init 工具推断
+      if command -v apk >/dev/null 2>&1; then
+        OS_FAMILY="alpine"; INIT_SYSTEM="openrc"
+        SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
+        warn "系统 ${pretty:-unknown} 未识别, 检测到 apk, 按 Alpine/OpenRC 处理"
+      elif command -v apt-get >/dev/null 2>&1; then
+        OS_FAMILY="debian"; INIT_SYSTEM="systemd"
+        SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+        warn "系统 ${pretty:-unknown} 未识别, 检测到 apt-get, 按 Debian/systemd 处理"
+      else
+        die "无法识别的系统 (${pretty:-unknown}), 仅支持 Debian 系与 Alpine"
+      fi
+      ;;
+  esac
+
+  # 校验 init 工具真实可用
+  case "$INIT_SYSTEM" in
+    systemd)
+      command -v systemctl >/dev/null 2>&1 || die "未找到 systemctl, 无法用 systemd 托管服务"
+      ;;
+    openrc)
+      command -v rc-service >/dev/null 2>&1 || {
+        warn "未检测到 OpenRC, 尝试安装"
+        apk add --no-cache openrc >/dev/null 2>&1 || die "OpenRC 安装失败"
+      }
+      command -v rc-update >/dev/null 2>&1 || die "未找到 rc-update, OpenRC 不可用"
+      ;;
+  esac
 }
 
-# 依赖: curl 或 wget 二选一, 其余按需安装
+# 依赖: 按发行版选择包管理器; Alpine 默认没有 bash/curl/ss
 check_deps() {
-  local missing=()
-  command -v curl   >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing+=(curl)
-  command -v tar    >/dev/null 2>&1 || missing+=(tar)
-  command -v ss     >/dev/null 2>&1 || missing+=(iproute2)
+  local pkgs=() need_curl=0
 
-  if ((${#missing[@]})); then
-    info "安装依赖: ${missing[*]}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq || die "apt-get update 失败"
-    apt-get install -y -qq "${missing[@]}" >/dev/null || die "依赖安装失败"
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || need_curl=1
+  command -v tar  >/dev/null 2>&1 || pkgs+=(tar)
+  command -v ss   >/dev/null 2>&1 || pkgs+=(iproute2)
+
+  if ((need_curl)); then
+    # Alpine 优先装 curl(带 TLS 支持, wget 在某些精简镜像里行为不一致)
+    command -v curl >/dev/null 2>&1 || pkgs+=(curl)
+  fi
+
+  # Alpine 的 busybox wget 对 HTTPS 支持视编译选项而定, 统一装 curl 更稳
+  if [[ "$OS_FAMILY" == "alpine" ]] && ! command -v curl >/dev/null 2>&1; then
+    pkgs+=(curl)
+  fi
+
+  # 去重
+  if ((${#pkgs[@]})); then
+    local uniq
+    uniq="$(printf '%s\n' "${pkgs[@]}" | awk '!seen[$0]++')"
+    info "安装依赖: $(printf '%s' "$uniq" | tr '\n' ' ')"
+    case "$OS_FAMILY" in
+      alpine)
+        # shellcheck disable=SC2086
+        apk add --no-cache $uniq >/dev/null 2>&1 || die "apk add 失败"
+        ;;
+      debian)
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq || die "apt-get update 失败"
+        # shellcheck disable=SC2086
+        apt-get install -y -qq $uniq >/dev/null || die "依赖安装失败"
+        ;;
+    esac
   fi
   ok "依赖就绪"
 }
@@ -402,6 +486,13 @@ EOF
 
 # ---------------------------------------------------------------- 注册服务 --
 write_service() {
+  case "$INIT_SYSTEM" in
+    systemd) write_service_systemd ;;
+    openrc)  write_service_openrc ;;
+  esac
+}
+
+write_service_systemd() {
   cat >"$SERVICE_FILE" <<EOF
 [Unit]
 Description=sing-box MTPROXY Server (extended)
@@ -417,6 +508,10 @@ ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=1048576
+# sing-box 对 SIGTERM 的响应在部分场景下较慢, 给足优雅退出时间;
+# 超时后由 systemd 发 SIGKILL 兜底
+KillSignal=SIGTERM
+TimeoutStopSec=15
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 NoNewPrivileges=false
@@ -430,17 +525,89 @@ EOF
   ok "systemd 服务已注册: ${SERVICE_FILE}"
 }
 
+write_service_openrc() {
+  mkdir -p /etc/init.d
+
+  cat >"$SERVICE_FILE" <<EOF
+#!/sbin/openrc-run
+
+name="${SERVICE_NAME}"
+description="sing-box MTPROXY Server (extended)"
+
+command="${BIN_PATH}"
+command_args="run -c ${CONFIG_FILE}"
+command_background="yes"
+command_user="root"
+pidfile="/run/\${RC_SVCNAME}.pid"
+
+output_log="/var/log/\${RC_SVCNAME}.log"
+error_log="/var/log/\${RC_SVCNAME}.log"
+
+# 日志目录需存在, 否则 redirect 会失败
+start_pre() {
+    checkpath --directory --mode 0755 /var/log
+}
+
+# sing-box 收到 SIGTERM 后可能长时间不退出(实测在 Alpine 上，
+# 有活跃连接或 DNS 超时时会挂住), 因此停止时先 TERM 等待,
+# 超时后强制 KILL, 保证服务能可靠停下
+stop() {
+    local pf="\${pidfile}"
+    ebegin "Stopping \${RC_SVCNAME}"
+    if [ -f "\${pf}" ]; then
+        local pid
+        pid="\$(cat "\${pf}" 2>/dev/null)"
+        if [ -n "\${pid}" ] && kill -0 "\${pid}" 2>/dev/null; then
+            kill -TERM "\${pid}" 2>/dev/null
+            # 最多等 10 秒
+            local i=0
+            while [ \$i -lt 10 ] && kill -0 "\${pid}" 2>/dev/null; do
+                sleep 1
+                i=\$((i + 1))
+            done
+            if kill -0 "\${pid}" 2>/dev/null; then
+                ewend 1 "force killing \${RC_SVCNAME} (pid \${pid})"
+                kill -KILL "\${pid}" 2>/dev/null
+                sleep 1
+            fi
+        fi
+        rm -f "\${pf}"
+    fi
+    eend 0
+}
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+
+  chmod 0755 "$SERVICE_FILE"
+
+  # 加入 default runlevel 实现开机自启
+  rc-update add "$SERVICE_NAME" default >/dev/null 2>&1 || warn "rc-update add 失败, 开机自启可能未生效"
+  ok "OpenRC 服务已注册: ${SERVICE_FILE}"
+}
+
 # ---------------------------------------------------------------- 防火墙放行 --
 open_firewall() {
-  # ufw
+  # Debian: ufw
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
     ufw allow "${PORT}/tcp" >/dev/null 2>&1 && ok "ufw 已放行 ${PORT}/tcp" || warn "ufw 放行失败"
   fi
-  # firewalld
-  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+  # Debian: firewalld
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
     firewall-cmd --permanent --add-port="${PORT}/tcp" >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
     ok "firewalld 已放行 ${PORT}/tcp"
+  fi
+  # Alpine 极少启用本地防火墙; 若装了 iptables 且策略为 DROP 才提示
+  if [[ "$OS_FAMILY" == "alpine" ]] && command -v iptables >/dev/null 2>&1; then
+    local policy
+    policy="$(iptables -S INPUT 2>/dev/null | head -n1 || true)"
+    if [[ "$policy" == *"-P INPUT DROP"* ]]; then
+      warn "检测到 INPUT 默认 DROP, 需手动放行: iptables -A INPUT -p tcp --dport ${PORT} -j ACCEPT"
+    fi
   fi
   # iptables 不做自动改动, 避免破坏现有规则
 }
@@ -457,6 +624,50 @@ probe_upstream() {
 }
 
 # ---------------------------------------------------------------- 启动验证 --
+service_restart() {
+  case "$INIT_SYSTEM" in
+    systemd) systemctl restart "$SERVICE_NAME" ;;
+    openrc)  rc-service "$SERVICE_NAME" restart 2>/dev/null || rc-service "$SERVICE_NAME" start ;;
+  esac
+}
+
+service_stop() {
+  case "$INIT_SYSTEM" in
+    systemd) systemctl stop "$SERVICE_NAME" 2>/dev/null || true ;;
+    openrc)  rc-service "$SERVICE_NAME" stop 2>/dev/null || true ;;
+  esac
+}
+
+service_is_active() {
+  case "$INIT_SYSTEM" in
+    systemd) systemctl is-active --quiet "$SERVICE_NAME" ;;
+    openrc)  rc-service "$SERVICE_NAME" status 2>/dev/null | grep -q "status: started" ;;
+  esac
+}
+
+service_logs() {
+  local n="${1:-30}"
+  case "$INIT_SYSTEM" in
+    systemd) journalctl -u "$SERVICE_NAME" -n "$n" --no-pager 2>/dev/null || true ;;
+    openrc)
+      if [[ -f "/var/log/${SERVICE_NAME}.log" ]]; then
+        tail -n "$n" "/var/log/${SERVICE_NAME}.log"
+      else
+        echo "(暂无日志: /var/log/${SERVICE_NAME}.log)"
+      fi
+      ;;
+  esac
+}
+
+port_listening() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntp 2>/dev/null | grep -qE "[:.]${PORT}[[:space:]]"
+  else
+    # 无 ss 时用 busybox netstat 兜底
+    netstat -lnt 2>/dev/null | grep -qE "[:.]${PORT}[[:space:]]"
+  fi
+}
+
 start_service() {
   if [[ "$AUTO_UPDATE" == "1" ]]; then
     info "检测到 Telegram DC 更新源连通性..."
@@ -469,27 +680,26 @@ start_service() {
   fi
 
   info "启动服务..."
-  systemctl restart "$SERVICE_NAME" || die "服务启动失败, 查看日志: journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
+  service_restart || { service_logs 50 >&2; die "服务启动失败"; }
   sleep 2
 
-  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    journalctl -u "$SERVICE_NAME" -n 30 --no-pager >&2 || true
+  if ! service_is_active; then
+    service_logs 30 >&2
     die "服务未能保持运行"
   fi
 
   # 端口监听检查
   local listen_ok=0
-  if command -v ss >/dev/null 2>&1; then
-    for _ in 1 2 3 4 5; do
-      if ss -lntp 2>/dev/null | grep -qE "[:.]${PORT}[[:space:]]"; then
-        listen_ok=1; break
-      fi
-      sleep 1
-    done
-  else
-    listen_ok=1
+  for _ in 1 2 3 4 5; do
+    if port_listening; then
+      listen_ok=1; break
+    fi
+    sleep 1
+  done
+  if ((!listen_ok)); then
+    service_logs 30 >&2
+    die "端口 ${PORT} 未监听"
   fi
-  ((listen_ok)) || { journalctl -u "$SERVICE_NAME" -n 30 --no-pager >&2; die "端口 ${PORT} 未监听"; }
   ok "服务运行中, 端口 ${PORT} 已监听"
 }
 
@@ -514,6 +724,7 @@ print_summary() {
   printf '  配置文件    : %s\n' "$CONFIG_FILE"
   printf '  二进制      : %s\n' "$BIN_PATH"
   printf '  服务名      : %s\n' "$SERVICE_NAME"
+  printf '  初始化系统  : %s\n' "$INIT_SYSTEM"
   echo
   printf '%s  Telegram 代理链接:%s\n' "$C_BLD" "$C_RST"
   printf '%s\n' "$link"
@@ -523,12 +734,21 @@ print_summary() {
   hr
   printf '  管理命令\n'
   hr
-  printf '  %s status %s     查看状态\n' "systemctl" "$SERVICE_NAME"
-  printf '  %s restart %s    重启\n'  "systemctl" "$SERVICE_NAME"
-  printf '  %s stop %s       停止\n'  "systemctl" "$SERVICE_NAME"
-  printf '  %s -u %s -f     实时日志\n' "journalctl" "$SERVICE_NAME"
+  case "$INIT_SYSTEM" in
+    systemd)
+      printf '  systemctl status %s     查看状态\n' "$SERVICE_NAME"
+      printf '  systemctl restart %s    重启\n'  "$SERVICE_NAME"
+      printf '  systemctl stop %s       停止\n'  "$SERVICE_NAME"
+      printf '  journalctl -u %s -f     实时日志\n' "$SERVICE_NAME"
+      ;;
+    openrc)
+      printf '  rc-service %s status    查看状态\n' "$SERVICE_NAME"
+      printf '  rc-service %s restart   重启\n'  "$SERVICE_NAME"
+      printf '  rc-service %s stop      停止\n'  "$SERVICE_NAME"
+      printf '  tail -f /var/log/%s.log 实时日志\n' "$SERVICE_NAME"
+      ;;
+  esac
   printf '  bash %s info      重新打印此信息\n' "$(basename "$0")"
-  printf '  远程重跑: curl -fsSL %s | sudo bash -s -- info\n' "$RAW_URL"
   printf '  bash %s uninstall 卸载\n' "$(basename "$0")"
   echo
 }
@@ -551,10 +771,20 @@ cmd_info() {
 # ------------------------------------------------------------------ 卸载 --
 cmd_uninstall() {
   info "开始卸载..."
-  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-  systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-  rm -f "$SERVICE_FILE"
-  systemctl daemon-reload 2>/dev/null || true
+  case "$INIT_SYSTEM" in
+    systemd)
+      systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+      systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+      rm -f "$SERVICE_FILE"
+      systemctl daemon-reload 2>/dev/null || true
+      ;;
+    openrc)
+      rc-service "$SERVICE_NAME" stop 2>/dev/null || true
+      rc-update del "$SERVICE_NAME" default 2>/dev/null || true
+      rm -f "$SERVICE_FILE"
+      rm -f "/var/log/${SERVICE_NAME}.log"
+      ;;
+  esac
 
   if [[ "${KEEP_CONFIG:-0}" == "1" ]]; then
     warn "保留配置: ${CONFIG_FILE}"
@@ -576,7 +806,7 @@ main() {
 
   case "$action" in
     install)
-      check_os
+      detect_platform
       check_deps
 
       [[ -n "$DOMAIN" ]] || DOMAIN="${DEFAULT_DOMAINS[RANDOM % ${#DEFAULT_DOMAINS[@]}]}"
@@ -608,15 +838,17 @@ main() {
       ;;
 
     info)
+      detect_platform
       cmd_info
       ;;
 
     uninstall|remove)
+      detect_platform
       cmd_uninstall
       ;;
 
     -h|--help|help)
-      sed -n '2,30p' "$0" | sed -e 's/^# \{0,1\}//'
+      sed -n '2,32p' "$0" | sed -e 's/^# \{0,1\}//'
       ;;
 
     *)
