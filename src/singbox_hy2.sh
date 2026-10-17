@@ -35,8 +35,9 @@ RAW_FILE="singbox_hy2.sh"
 NEED_CERT=1
 NEED_DOMAIN=1
 PORT_SPECS=("PORT:udp")
+PORT_DEFAULTS="PORT=443"
 
-PORT="${PORT:-443}"
+PORT="${PORT:-}"
 PASSWORD="${PASSWORD:-}"
 OBFS="${OBFS:-}"
 DOMAIN="${DOMAIN:-}"
@@ -109,7 +110,10 @@ EOF
 
 # ---------------------------------------------------------------- 凭据 ------
 prepare_secrets() {
+  # 重装时复用旧凭据与混淆密码, 否则客户端链接会变
+  [[ -n "$PASSWORD" ]] || PASSWORD="$(config_pick inbounds.0.users.0.password)"
   [[ -n "$PASSWORD" ]] || PASSWORD="$(rand_token 16)"
+  [[ -n "$OBFS" ]] || OBFS="$(config_pick inbounds.0.obfs.password)"
   ok "密码: ${PASSWORD}"
   [[ -z "$OBFS" ]] || ok "混淆: salamander"
 }
@@ -180,6 +184,11 @@ singbox_hy2.sh - 一键部署 Hysteria2 服务端 (sing-box-extended)
   SERVER_ADDR=1.2.3.4                  # 指定对外 IP
   MIRROR=https://ghfast.top/https://github.com
   SINGBOX_TAG=v1.14.1-extended-2.7.2   # 覆盖锁定的内核版本
+  LOG_LEVEL=debug                      # 日志级别(默认 info)
+  FORCE_BIN=1                          # 强制重新下载内核
+
+端口冲突时: 会提示输入新端口, 10 秒不输入则自动挑一个不常用的可用端口
+  (PORT_PROMPT_TIMEOUT=10 可改等待秒数)
 USAGE
 }
 

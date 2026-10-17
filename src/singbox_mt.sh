@@ -40,8 +40,9 @@ RAW_FILE="singbox_mt.sh"
 NEED_CERT=0
 NEED_DOMAIN=1
 PORT_SPECS=("PORT:tcp")
+PORT_DEFAULTS="PORT=443"
 
-PORT="${PORT:-443}"
+PORT="${PORT:-}"
 DOMAIN="${DOMAIN:-}"
 USER_NAME="${USER_NAME:-user1}"
 CONCURRENCY="${CONCURRENCY:-8192}"
@@ -128,7 +129,9 @@ EOF
 
 # ---------------------------------------------------------------- 凭据 ------
 prepare_secrets() {
-  SECRET="$(gen_secret "$DOMAIN")"
+  # 重装时复用旧 secret, 否则 t.me 链接全部失效(secret 里嵌着 FakeTLS 域名)
+  [[ -n "$SECRET" ]] || SECRET="$(config_pick inbounds.0.users.0.secret)"
+  [[ -n "$SECRET" ]] || SECRET="$(gen_secret "$DOMAIN")"
   [[ ${#SECRET} -gt 34 ]] || die "secret 生成异常: ${SECRET}"
   ok "secret 已生成 (长度 ${#SECRET})"
 }
@@ -214,6 +217,11 @@ singbox_mt.sh - 一键部署 MTPROXY 服务端 (sing-box-extended)
   SERVER_ADDR=1.2.3.4                        # 指定对外 IP
   MIRROR=https://ghfast.top/https://github.com
   SINGBOX_TAG=v1.14.1-extended-2.7.2         # 覆盖锁定的内核版本
+  LOG_LEVEL=debug                      # 日志级别(默认 info)
+  FORCE_BIN=1                          # 强制重新下载内核
+
+端口冲突时: 会提示输入新端口, 10 秒不输入则自动挑一个不常用的可用端口
+  (PORT_PROMPT_TIMEOUT=10 可改等待秒数)
 USAGE
 }
 

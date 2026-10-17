@@ -44,8 +44,9 @@ RAW_FILE="singbox_vless_vmess.sh"
 NEED_CERT=1
 NEED_DOMAIN=1
 PORT_SPECS=("PORT:tcp" "VMESS_PORT:tcp")
+PORT_DEFAULTS="PORT=8989"
 
-PORT="${PORT:-8989}"
+PORT="${PORT:-}"
 VMESS_PORT="${VMESS_PORT:-}"   # 留空表示待推导, 由 port_defaults_hook 决定
 UUID="${UUID:-}"
 VMESS_UUID="${VMESS_UUID:-}"
@@ -93,9 +94,21 @@ SINGBOX_API="https://api.github.com/repos/${REPO}/releases"
 
 MIRROR="${MIRROR:-}"
 SERVER_ADDR="${SERVER_ADDR:-}"
-LOG_LEVEL="${LOG_LEVEL:-warn}"
+# info 级别能记录握手/认证失败, 是排查「服务正常但连不上」的关键; warn 会把这些吞掉
+LOG_LEVEL="${LOG_LEVEL:-info}"
 FORCE_BIN="${FORCE_BIN:-0}"
 KEEP_CONFIG="${KEEP_CONFIG:-0}"
+
+# 端口冲突时的处理: 提示输入新端口, 超时或非交互则自动挑一个不常用端口
+PORT_PROMPT_TIMEOUT="${PORT_PROMPT_TIMEOUT:-10}"
+PORT_RANDOM_FROM="${PORT_RANDOM_FROM:-20000}"
+PORT_RANDOM_TO="${PORT_RANDOM_TO:-60000}"
+# 交互输入来源; 测试或特殊环境可覆盖
+PORT_TTY="${PORT_TTY:-/dev/tty}"
+
+# 自动挑端口时排除的常用端口(以及所有 1024 以下端口)
+PORT_BLOCKLIST="22 25 53 80 110 143 443 465 587 993 995 1080 2049 3306 \
+3389 5432 5900 6379 8080 8443 8888 9090 11211 27017"
 
 RAW_URL="https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/${RAW_FILE}"
 
@@ -600,6 +613,34 @@ PY
     | sed -e 's/.*:[[:space:]]*//'
 }
 
+# 按路径精确读取已有配置里的某个字段, 用于重装时复用凭据
+# 用法: config_pick "inbounds.0.users.0.password"
+config_pick() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$CONFIG_FILE" "$1" <<'PY' 2>/dev/null | tr -d '\r'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for part in sys.argv[2].split('.'):
+    if isinstance(d, list):
+        try:
+            d = d[int(part)]
+        except (ValueError, IndexError):
+            sys.exit(0)
+    elif isinstance(d, dict):
+        if part not in d:
+            sys.exit(0)
+        d = d[part]
+    else:
+        sys.exit(0)
+if isinstance(d, (str, int)) and not isinstance(d, bool):
+    print(d)
+PY
+}
+
 # ---------------------------------------------------------------- 写配置 ----
 # 备份 -> 渲染 -> 600 -> 校验; render_config 由协议段提供
 write_config() {
@@ -776,31 +817,215 @@ port_busy() {
   return 1
 }
 
-# 校验并归一化所有声明端口; PORT_SPECS = ("PORT:tcp" ...)
-resolve_ports() {
-  local spec name proto p
+# 占用者(进程名), 拿不到就返回空
+port_owner() {
+  local port="$1" proto="$2" flag="-lntp"
+  [[ "$proto" == "udp" ]] && flag="-lnup"
+  command -v ss >/dev/null 2>&1 || return 0
+  ss "$flag" 2>/dev/null | awk -v p="$port" 'NR>1 && $4 ~ "[:.]"p"$" {print $6; exit}' \
+    | grep -oE '"[^"]+"' | head -n1 | tr -d '"'
+}
 
-  # 协议段可在此补默认端口(如 VMess 取 VLESS+1)
+# 其他 sing-box 配置里已声明的端口(用于避开, 避免两个协议抢同一端口)
+singbox_ports() {
+  local f
+  for f in "${CONFIG_DIR}"/*.json; do
+    [[ -f "$f" ]] || continue
+    [[ "$f" == "$CONFIG_FILE" ]] && continue
+    grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$f" 2>/dev/null \
+      | grep -oE '[0-9]+'
+  done | sort -u
+}
+
+# 真实 bind 一次, 确认端口可用(ss 看到的可能不完整, 如被其他 netns/进程预留)
+port_bindable() {
+  local port="$1" proto="$2"
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$port" "$proto" <<'PY' 2>/dev/null
+import socket, sys
+port = int(sys.argv[1])
+for pr in sys.argv[2].split(','):
+    kind = socket.SOCK_DGRAM if pr == 'udp' else socket.SOCK_STREAM
+    s = socket.socket(socket.AF_INET, kind)
+    try:
+        s.bind(('0.0.0.0', port))
+    except OSError:
+        sys.exit(1)
+    finally:
+        s.close()
+PY
+}
+
+# 随机挑一个不常用且可用的端口; 额外排除参数里的端口
+pick_free_port() {
+  local proto="$1"; shift
+  local i p used skip
+  used=" $(singbox_ports | tr '\n' ' ') $* "
+  for i in $(seq 1 300); do
+    p=$(( (RANDOM * 32768 + RANDOM) % (PORT_RANDOM_TO - PORT_RANDOM_FROM + 1) + PORT_RANDOM_FROM ))
+    if ((p < 1024)); then
+      continue
+    fi
+    local skip=0 x
+    for x in $PORT_BLOCKLIST $used; do
+      [[ "$x" == "$p" ]] && { skip=1; break; }
+    done
+    if ((skip)); then
+      continue
+    fi
+    if port_busy "$p" "$proto"; then
+      continue
+    fi
+    if ! port_bindable "$p" "$proto"; then
+      continue
+    fi
+    printf '%s' "$p"
+    return 0
+  done
+  return 1
+}
+
+# 端口冲突时询问用户; 返回非 0 表示超时/跳过/无法输入
+# 输入走 /dev/tty: curl | bash 时 stdin 是脚本本身, 读 stdin 会把脚本吃掉
+ask_port() {
+  local name="$1" cur="$2" proto="$3" reply="" i
+  [[ -r "$PORT_TTY" ]] || return 1
+  for i in 1 2 3; do
+    {
+      printf '\n端口 %s/%s 已被占用%s。\n' "$cur" "$proto" \
+        "$(owner_hint "$cur" "$proto")"
+      printf '请输入新的 %s [1-65535], %s 秒内不输入则自动挑选: ' \
+        "$name" "$PORT_PROMPT_TIMEOUT"
+    } >&2
+    if ! IFS= read -r -t "$PORT_PROMPT_TIMEOUT" reply <"$PORT_TTY"; then
+      printf '\n' >&2
+      return 1                       # 超时 -> 自动挑选
+    fi
+    reply="${reply//[[:space:]]/}"
+    [[ -z "$reply" ]] && return 1    # 直接回车 -> 自动挑选
+    if ! [[ "$reply" =~ ^[0-9]+$ ]]; then
+      warn "不是合法端口: ${reply}"
+      continue
+    fi
+    reply="$((10#$reply))"
+    if ((reply < 1 || reply > 65535)); then
+      warn "端口超出范围 1-65535: ${reply}"
+      continue
+    fi
+    if port_busy "$reply" "$proto"; then
+      warn "端口 ${reply}/${proto} 同样被占用, 请再换一个"
+      continue
+    fi
+    printf '%s' "$reply"
+    return 0
+  done
+  return 1
+}
+
+owner_hint() {
+  local who
+  who="$(port_owner "$1" "$2")"
+  [[ -n "$who" ]] && printf ' (占用者: %s)' "$who"
+  return 0
+}
+
+# 端口默认值: 协议段用 PORT_DEFAULTS="PORT=443 VMESS_PORT=8990" 声明
+port_default_of() {
+  local kv
+  for kv in ${PORT_DEFAULTS:-}; do
+    [[ "${kv%%=*}" == "$1" ]] && { printf '%s' "${kv#*=}"; return 0; }
+  done
+  return 0
+}
+
+# 已有配置里的 listen_port(按出现顺序), 用于重装时沿用端口
+existing_ports() {
+  [[ -f "$CONFIG_FILE" ]] || return 0
+  grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$CONFIG_FILE" 2>/dev/null \
+    | grep -oE '[0-9]+'
+}
+
+# 校验并归一化所有声明端口; PORT_SPECS = ("PORT:tcp" ...)
+# 优先级: 显式环境变量 > 已有配置 > PORT_DEFAULTS 默认值 > port_defaults_hook 推导
+resolve_ports() {
+  local spec name proto p idx=0 changed=0 assigned="" newp
+  local existing=() line
+
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then
+      existing+=("$line")
+    fi
+  done < <(existing_ports)
+
+  # 1) 取值优先级: 显式环境变量 > 已有配置 > PORT_DEFAULTS 默认值
+  #    这里允许暂时为空, 留给 port_defaults_hook 推导(如 VMess 取 VLESS+1)
+  for spec in "${PORT_SPECS[@]}"; do
+    name="${spec%%:*}"; proto="${spec#*:}"
+    p="${!name:-}"
+
+    if [[ -z "$p" && -n "${existing[$idx]:-}" ]]; then
+      p="${existing[$idx]}"
+      info "沿用已有配置端口 ${name}=${p}"
+    fi
+    [[ -n "$p" ]] || p="$(port_default_of "$name")"
+    if [[ -n "$p" ]]; then
+      printf -v "$name" '%s' "$p"
+    fi
+    idx=$((idx + 1))
+  done
+
+  # 2) 协议段补默认端口(如 VMess 取 VLESS+1)
   if declare -F port_defaults_hook >/dev/null; then
     port_defaults_hook
   fi
 
+  # 3) 统一校验: 非空 / 数字 / 范围
+  for spec in "${PORT_SPECS[@]}"; do
+    name="${spec%%:*}"; proto="${spec#*:}"
+    p="${!name:-}"
+    [[ -n "$p" ]] || die "未设置 ${name}, 且没有可用默认值(可用 ${name}=<端口> 指定)"
+    [[ "$p" =~ ^[0-9]+$ ]] || die "${name} 必须是数字: ${p}"
+    p="$((10#$p))"          # 10# 避免 0808 被当成八进制
+    ((p >= 1 && p <= 65535)) || die "${name} 超出范围 (1-65535): ${p}"
+    printf -v "$name" '%s' "$p"
+  done
+
+  # 先做一次交叉校验: 显式把两个协议指到同一端口属于配置错误, 应直接报错
+  if declare -F port_validate_hook >/dev/null; then
+    port_validate_hook
+  fi
+
+  # 冲突处理: 询问 -> 超时/非交互则自动挑
   for spec in "${PORT_SPECS[@]}"; do
     name="${spec%%:*}"; proto="${spec#*:}"
     p="${!name}"
-    [[ "$p" =~ ^[0-9]+$ ]] || die "${name} 必须是数字: ${p}"
-    p="$((10#$p))"          # 10# 避免 0808 被当成八进制
-    printf -v "$name" '%s' "$p"
-    ((p >= 1 && p <= 65535)) || die "${name} 超出范围 (1-65535): ${p}"
-    if port_busy "$p" "$proto"; then
-      die "端口 ${p}/${proto} 已被占用, 请换端口: ${name}=<新端口>"
+
+    if port_busy "$p" "$proto" || [[ " $assigned " == *" $p " ]]; then
+      if port_busy "$p" "$proto"; then
+        newp="$(ask_port "$name" "$p" "$proto")" || newp=""
+      else
+        newp=""
+      fi
+      if [[ -z "$newp" ]]; then
+        newp="$(pick_free_port "$proto" $assigned)" \
+          || die "端口 ${p}/${proto} 无法使用, 且自动挑选失败, 请显式指定 ${name}=<端口>"
+        warn "端口 ${p}/${proto} 不可用, 自动改用 ${newp}/${proto}"
+      else
+        ok "端口已改为 ${newp}/${proto}"
+      fi
+      printf -v "$name" '%s' "$newp"
+      changed=1
     fi
+
+    assigned+=" ${!name}"
   done
 
   if declare -F port_validate_hook >/dev/null; then
     port_validate_hook
   fi
   ok "端口: $(port_summary)"
+  ((changed)) && warn "端口与原计划不同, 云服务器记得在安全组放行新端口"
+  return 0
 }
 
 port_summary() {
@@ -975,16 +1200,20 @@ cmd_uninstall() {
 do_install() {
   check_os
   check_deps
-  resolve_ports
 
-  if ((NEED_DOMAIN)); then
-    [[ -n "$DOMAIN" ]] || DOMAIN="${DEFAULT_DOMAINS[RANDOM % ${#DEFAULT_DOMAINS[@]}]}"
-    ok "域名 / SNI: ${DOMAIN}"
-  fi
-
+  # 先停掉同名服务, 否则重装时自己占着的端口会被判定为冲突
   if service_is_active 2>/dev/null; then
     info "检测到 ${SERVICE_NAME} 正在运行, 先停止..."
     service_stop
+  fi
+
+  resolve_ports
+
+  if ((NEED_DOMAIN)); then
+    # 重装时沿用旧 SNI: FakeTLS / 证书域名变了, 老客户端会直接连不上
+    [[ -n "$DOMAIN" ]] || DOMAIN="$(config_pick inbounds.0.tls.server_name)"
+    [[ -n "$DOMAIN" ]] || DOMAIN="${DEFAULT_DOMAINS[RANDOM % ${#DEFAULT_DOMAINS[@]}]}"
+    ok "域名 / SNI: ${DOMAIN}"
   fi
 
   install_binary
@@ -1120,6 +1349,9 @@ EOF
 
 # ---------------------------------------------------------------- 凭据 ------
 prepare_secrets() {
+  # 重装时复用旧 UUID, 否则已有客户端会全部失效
+  [[ -n "$UUID" ]] || UUID="$(config_pick inbounds.0.users.0.uuid)"
+  [[ -n "$VMESS_UUID" ]] || VMESS_UUID="$(config_pick inbounds.1.users.0.uuid)"
   [[ -n "$UUID" ]] || UUID="$(gen_uuid)"
   [[ -n "$VMESS_UUID" ]] || VMESS_UUID="$(gen_uuid)"
   ok "VLESS UUID: ${UUID}"
@@ -1214,6 +1446,11 @@ singbox_vless_vmess.sh - 一键部署 VLESS + VMess 服务端 (sing-box-extended
   SERVER_ADDR=1.2.3.4                        # 指定对外 IP
   MIRROR=https://ghfast.top/https://github.com
   SINGBOX_TAG=v1.14.1-extended-2.7.2         # 覆盖锁定的内核版本
+  LOG_LEVEL=debug                      # 日志级别(默认 info)
+  FORCE_BIN=1                          # 强制重新下载内核
+
+端口冲突时: 会提示输入新端口, 10 秒不输入则自动挑一个不常用的可用端口
+  (PORT_PROMPT_TIMEOUT=10 可改等待秒数)
 USAGE
 }
 

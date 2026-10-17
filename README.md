@@ -75,6 +75,29 @@ PORT=8443 DOMAIN=www.apple.com SERVER_ADDR=1.2.3.4 bash singbox_mt.sh
 | `AUTO_UPDATE` | `0` | 是否自动更新 Telegram DC 列表 |
 | `MIRROR` | 空 | GitHub 加速前缀，如 `https://ghfast.top/https://github.com` |
 
+### 端口冲突怎么办
+
+同一台机器装第二个协议时，默认端口很可能已经被占（`hy2` 与 `tuic` 都用 `443/udp`）。脚本不会直接报错退出，而是：
+
+1. 打印占用者（`ss` 能识别到进程名时），**提示输入新端口，等待 10 秒**；
+2. 10 秒内不输入、直接回车、或环境没有终端（cron / 无 tty），就**自动挑一个不常用端口**（`20000-60000`，排除 22/80/443/3306/3389 等常用端口、其他 `singbox-*` 已声明的端口，并用真实 bind 校验一次）；
+3. 明确提示「端口与原计划不同，云服务器记得在安全组放行新端口」。
+
+```bash
+# 交互式换端口：直接跑，按提示输入
+sudo bash singbox_hy2.sh
+
+# 不想交互：显式指定，优先级最高
+sudo PORT=28443 bash singbox_hy2.sh
+
+# 缩短/延长等待时间（秒）
+sudo PORT_PROMPT_TIMEOUT=3 bash singbox_hy2.sh
+```
+
+**重装不会改端口和凭据。** 只要不显式传参，脚本会从上一次的 `/etc/sing-box/<协议>.json` 里沿用端口、UUID、密码、混淆密码、SNI，已有客户端因此不会失效。显式传 `PORT=...` 才会改。
+
+> 端口是否冲突按协议分别判断：`443/udp` 和 `443/tcp` 并不冲突，只有同协议同端口才算占用。
+
 ### 其他命令
 
 ```bash
@@ -273,7 +296,11 @@ PORT_SPECS=("PORT:udp")              # QUIC 系（Hysteria2 / TUIC）
 PORT_SPECS=("PORT:tcp" "VMESS_PORT:tcp")   # 双入站
 ```
 
-协议若需要派生默认值（如 VMess 取 `PORT+1`），实现 `port_defaults_hook`；需要交叉校验（如两端口不能相同）就实现 `port_validate_hook`。
+协议若需要派生默认值（如 VMess 取 `PORT+1`），实现 `port_defaults_hook`；需要交叉校验（如两端口不能相同）就实现 `port_validate_hook`。默认端口用 `PORT_DEFAULTS="PORT=443"` 声明，不要写成 `PORT="${PORT:-443}"` —— 公共层需要区分「用户显式指定」与「默认值」，才能正确沿用上一次配置里的端口。
+
+端口取值的优先级是：**显式环境变量 > 已有 `CONFIG_FILE` 里的 `listen_port` > `PORT_DEFAULTS` > `port_defaults_hook` 推导**。
+
+交互输入统一走 `/dev/tty`（不是 stdin）：`curl ... | bash` 时 stdin 就是脚本自身，读 stdin 会把后半段脚本吃掉。
 
 ### 内核版本与二进制复用
 
@@ -383,6 +410,8 @@ MIRROR=https://ghfast.top/https://github.com bash singbox_mt.sh
 - 抽出公共层（`lib/common.sh` + `src/` + `build.sh`）后，五个脚本生成的**配置 JSON 与客户端链接与重构前逐字节一致**
 - 端口推导用例：`PORT=443` → 443/444、默认 → 8989/8990、`PORT=0808` → 808/809、`PORT=abc` / `PORT=70000` 明确报错
 - 同版本二进制复用生效（第二个协议不再下载）、`loong64` 自动选中 `-glibc` 变体
+- 端口冲突用例：`443` 被占用时输入 `23456` → 采用 23456；输入非法值 → 重问；输入被占用的端口 → 重问；超时 / 空回车 / 无终端 → 自动挑选 20000-60000 且避开常用端口
+- 重装幂等：同一机器连续两次 `do_install`，生成的配置逐字节一致（端口、UUID、密码、混淆、SNI 全部复用）
 
 ## 许可
 

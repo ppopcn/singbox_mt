@@ -32,8 +32,9 @@ RAW_FILE="singbox_ssr.sh"
 NEED_CERT=0
 NEED_DOMAIN=0
 PORT_SPECS=("PORT:tcp,udp")
+PORT_DEFAULTS="PORT=8388"
 
-PORT="${PORT:-8388}"
+PORT="${PORT:-}"
 PASSWORD="${PASSWORD:-}"
 METHOD="${METHOD:-aes-256-gcm}"
 
@@ -85,6 +86,8 @@ EOF
 
 # ---------------------------------------------------------------- 凭据 ------
 prepare_secrets() {
+  # 重装时复用旧凭据, 否则已有客户端会全部失效
+  [[ -n "$PASSWORD" ]] || PASSWORD="$(config_pick inbounds.0.password)"
   [[ -n "$PASSWORD" ]] || PASSWORD="$(rand_token 16)"
   ok "密码: ${PASSWORD}"
 }
@@ -145,6 +148,11 @@ singbox_ssr.sh - 一键部署 Shadowsocks (aes-256-gcm) 服务端
   SERVER_ADDR=1.2.3.4                        # 指定对外 IP
   MIRROR=https://ghfast.top/https://github.com
   SINGBOX_TAG=v1.14.1-extended-2.7.2         # 覆盖锁定的内核版本
+  LOG_LEVEL=debug                      # 日志级别(默认 info)
+  FORCE_BIN=1                          # 强制重新下载内核
+
+端口冲突时: 会提示输入新端口, 10 秒不输入则自动挑一个不常用的可用端口
+  (PORT_PROMPT_TIMEOUT=10 可改等待秒数)
 USAGE
 }
 

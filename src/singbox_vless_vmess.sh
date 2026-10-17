@@ -44,8 +44,9 @@ RAW_FILE="singbox_vless_vmess.sh"
 NEED_CERT=1
 NEED_DOMAIN=1
 PORT_SPECS=("PORT:tcp" "VMESS_PORT:tcp")
+PORT_DEFAULTS="PORT=8989"
 
-PORT="${PORT:-8989}"
+PORT="${PORT:-}"
 VMESS_PORT="${VMESS_PORT:-}"   # 留空表示待推导, 由 port_defaults_hook 决定
 UUID="${UUID:-}"
 VMESS_UUID="${VMESS_UUID:-}"
@@ -155,6 +156,9 @@ EOF
 
 # ---------------------------------------------------------------- 凭据 ------
 prepare_secrets() {
+  # 重装时复用旧 UUID, 否则已有客户端会全部失效
+  [[ -n "$UUID" ]] || UUID="$(config_pick inbounds.0.users.0.uuid)"
+  [[ -n "$VMESS_UUID" ]] || VMESS_UUID="$(config_pick inbounds.1.users.0.uuid)"
   [[ -n "$UUID" ]] || UUID="$(gen_uuid)"
   [[ -n "$VMESS_UUID" ]] || VMESS_UUID="$(gen_uuid)"
   ok "VLESS UUID: ${UUID}"
@@ -249,6 +253,11 @@ singbox_vless_vmess.sh - 一键部署 VLESS + VMess 服务端 (sing-box-extended
   SERVER_ADDR=1.2.3.4                        # 指定对外 IP
   MIRROR=https://ghfast.top/https://github.com
   SINGBOX_TAG=v1.14.1-extended-2.7.2         # 覆盖锁定的内核版本
+  LOG_LEVEL=debug                      # 日志级别(默认 info)
+  FORCE_BIN=1                          # 强制重新下载内核
+
+端口冲突时: 会提示输入新端口, 10 秒不输入则自动挑一个不常用的可用端口
+  (PORT_PROMPT_TIMEOUT=10 可改等待秒数)
 USAGE
 }
 
