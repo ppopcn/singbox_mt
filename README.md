@@ -7,7 +7,9 @@
 ```bash
 sudo bash singbox_mt.sh
 ```
-
+```OR
+curl -fsSL -H 'Cache-Control: no-cache' https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_mt.sh | bash
+```
 输出形如：
 
 ```
