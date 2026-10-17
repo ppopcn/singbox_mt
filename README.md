@@ -185,7 +185,7 @@ sudo CONGESTION=cubic bash singbox_tuic.sh
 生成的链接形如：
 
 ```
-tuic://UUID:PASSWORD@1.2.3.4:443?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=www.bing.com&allow_insecure=1#tuic-443
+tuic://UUID:PASSWORD@1.2.3.4:443?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=www.bing.com&allow_insecure=1&allowInsecure=1#tuic-443
 ```
 
 ### singbox_vless_vmess.sh — VLESS + VMess
@@ -222,6 +222,8 @@ vless://UUID@1.2.3.4:8989?encryption=none&security=tls&sni=www.bing.com&fp=chrom
 
 vmess://eyJ2IjoiMiIsInBzIjoi...
 ```
+
+> 自签证书必须跳过校验，两条链接里已经带上：VLESS 用 `allowInsecure=1`，VMess 的 JSON 里有 `"allowInsecure":"1"`。若客户端仍提示证书错误，手动打开「允许不安全证书」即可。
 
 客户端记得打开「允许不安全证书」。
 

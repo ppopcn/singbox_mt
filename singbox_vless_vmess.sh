@@ -625,7 +625,8 @@ build_vless_link() {
 
 build_vmess_link() {
   local server="$1" json
-  json="$(printf '{"v":"2","ps":"vmess-%s","add":"%s","port":"%s","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s","alpn":"http/1.1","fp":"chrome"}' \
+  # allowInsecure=1: 自签证书需跳过校验, 与 VLESS 链接保持一致; 不加则 TLS 握手直接失败
+  json="$(printf '{"v":"2","ps":"vmess-%s","add":"%s","port":"%s","id":"%s","aid":"0","scy":"auto","net":"ws","type":"none","host":"%s","path":"%s","tls":"tls","sni":"%s","alpn":"http/1.1","fp":"chrome","allowInsecure":"1"}' \
     "$VMESS_PORT" "$server" "$VMESS_PORT" "$VMESS_UUID" "$DOMAIN" "$VMESS_PATH" "$DOMAIN")"
   printf 'vmess://%s' "$(printf '%s' "$json" | base64 | tr -d '\r\n')"
 }

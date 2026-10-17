@@ -536,7 +536,8 @@ start_service() {
 # ---------------------------------------------------------------- 链接输出 --
 print_summary() {
   local server="$1" link
-  link="tuic://${UUID}:${PASSWORD}@${server}:${PORT}?congestion_control=${CONGESTION}&udp_relay_mode=native&alpn=h3&sni=${DOMAIN}&allow_insecure=1#tuic-${PORT}"
+  # 自签证书必须跳过校验: 两种写法都带上, 客户端按各自习惯取其一
+  link="tuic://${UUID}:${PASSWORD}@${server}:${PORT}?congestion_control=${CONGESTION}&udp_relay_mode=native&alpn=h3&sni=${DOMAIN}&allow_insecure=1&allowInsecure=1#tuic-${PORT}"
 
   echo
   hr
