@@ -41,6 +41,9 @@ https://t.me/proxy?server=1.2.3.4&port=443&secret=ee13c2...777772e636c6f7564666c
 ```bash
 sudo bash singbox_mt.sh
 ```
+```
+curl -fsSL -H 'Cache-Control: no-cache' https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_mt.sh | bash
+```
 
 默认行为：监听 `443`、用户名 `user1`、FakeTLS 模式、伪装域名从内置候选里随机挑一个。
 
