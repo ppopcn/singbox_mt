@@ -2,19 +2,24 @@
 #
 # singbox_vless_vmess.sh - 在 Debian / Ubuntu 上一键部署 VLESS + VMess 服务端
 #
-# 形态: VLESS over TLS + WebSocket (默认 8989) 与 VMess over TLS + WebSocket
-#       (默认 8990)。sing-box 每个端口只能挂一个协议入站, 所以两个协议用两个端口,
-#       端口可用 PORT / VMESS_PORT 调整。
+# 形态: VLESS over TLS + WebSocket 与 VMess over TLS + WebSocket。sing-box 每个
+#       端口只能挂一个协议入站, 所以两个协议占两个端口。
+#
+# 端口分配规则:
+#   指定 PORT      -> VLESS 用 PORT, VMess 自动用 PORT+1  (如 PORT=443 -> 443 / 444)
+#   未指定 PORT    -> VLESS 用 8989, VMess 用 8990
+#   指定 VMESS_PORT -> 覆盖 VMess 端口 (优先于 PORT+1)
 #
 # 用法:
 #   sudo bash singbox_vless_vmess.sh                       # 8989 vless + 8990 vmess
-#   sudo PORT=443 VMESS_PORT=8443 bash singbox_vless_vmess.sh
+#   sudo PORT=443 bash singbox_vless_vmess.sh              # 443 vless + 444 vmess
+#   sudo PORT=443 VMESS_PORT=8443 bash singbox_vless_vmess.sh  # 分别指定
 #   sudo bash singbox_vless_vmess.sh info                  # 重新打印凭据与链接
 #   sudo bash singbox_vless_vmess.sh uninstall             # 卸载
 #
 # 环境变量:
 #   PORT         VLESS 端口          默认 8989
-#   VMESS_PORT   VMess 端口          默认 8990
+#   VMESS_PORT   VMess 端口          默认 PORT+1 (PORT 未指定时为 8990)
 #   UUID         VLESS UUID          默认随机
 #   VMESS_UUID   VMess UUID          默认随机
 #   DOMAIN       TLS 域名/SNI        默认从内置候选随机
@@ -38,8 +43,9 @@ REPO="shtorm-7/sing-box-extended"
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 RAW_URL="https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_vless_vmess.sh"
 
+# 端口: PORT 显式指定时 VMess 默认取 PORT+1; 都没指定则 8989 / 8990
 PORT="${PORT:-8989}"
-VMESS_PORT="${VMESS_PORT:-8990}"
+VMESS_PORT="${VMESS_PORT:-}"   # 留空表示待推导, 由 resolve_ports 决定
 UUID="${UUID:-}"
 VMESS_UUID="${VMESS_UUID:-}"
 DOMAIN="${DOMAIN:-}"
@@ -531,6 +537,28 @@ EOF
 }
 
 # ---------------------------------------------------------------- 端口检查 --
+# 解析两个端口: 校验数值范围, 未指定 VMESS_PORT 时按 PORT+1 推导
+resolve_ports() {
+  [[ "$PORT" =~ ^[0-9]+$ ]] || die "PORT 必须是数字: ${PORT}"
+  PORT="$((10#$PORT))"   # 去掉前导 0, 避免被当成八进制
+  ((PORT >= 1 && PORT <= 65535)) || die "PORT 超出范围 (1-65535): ${PORT}"
+
+  if [[ -n "$VMESS_PORT" ]]; then
+    [[ "$VMESS_PORT" =~ ^[0-9]+$ ]] || die "VMESS_PORT 必须是数字: ${VMESS_PORT}"
+    VMESS_PORT="$((10#$VMESS_PORT))"
+    ((VMESS_PORT >= 1 && VMESS_PORT <= 65535)) \
+      || die "VMESS_PORT 超出范围 (1-65535): ${VMESS_PORT}"
+  else
+    ((PORT <= 65534)) || die "PORT=65535 时无法自动分配 VMess 端口, 请显式指定 VMESS_PORT"
+    VMESS_PORT=$((PORT + 1))
+    info "未指定 VMESS_PORT, VMess 端口自动设为 PORT+1 = ${VMESS_PORT}"
+  fi
+
+  [[ "$PORT" != "$VMESS_PORT" ]] \
+    || die "VLESS 与 VMess 不能用同一个端口 (sing-box 每端口只能一个入站)"
+  ok "端口分配: VLESS ${PORT} / VMess ${VMESS_PORT}"
+}
+
 port_busy() {
   local port="$1" proto="$2" flag="-lnt"
   [[ "$proto" == "udp" ]] && flag="-lnu"
@@ -653,8 +681,9 @@ cmd_info() {
 
   UUID="${uuids[0]:-}"
   VMESS_UUID="${uuids[1]:-}"
-  PORT="${ports[0]:-$PORT}"
-  VMESS_PORT="${ports[1]:-$VMESS_PORT}"
+  PORT="${ports[0]:-8989}"
+  VMESS_PORT="${ports[1]:-}"
+  [[ -n "$VMESS_PORT" ]] || VMESS_PORT=$((PORT + 1))
   DOMAIN="$(json_get "$CONFIG_FILE" server_name)"
   [[ -n "$UUID" && -n "$VMESS_UUID" ]] || die "配置中未解析到两个 UUID"
 
@@ -701,12 +730,16 @@ singbox_vless_vmess.sh - 一键部署 VLESS + VMess 服务端 (sing-box-extended
 
 用法:
   sudo bash singbox_vless_vmess.sh             # 安装 (vless 8989 / vmess 8990)
+  sudo PORT=443 bash singbox_vless_vmess.sh    # 安装 (vless 443 / vmess 444)
   sudo bash singbox_vless_vmess.sh info        # 查看凭据与链接
   sudo bash singbox_vless_vmess.sh uninstall   # 卸载
   sudo bash singbox_vless_vmess.sh help        # 本帮助
 
+端口规则:
+  PORT=8989                       # VLESS 端口; VMess 自动取 PORT+1
+  VMESS_PORT=8990                 # 单独覆盖 VMess 端口 (优先于 PORT+1)
+
 常用自定义 (环境变量):
-  PORT=8989 VMESS_PORT=8990                  # 两个协议各自的端口
   UUID=xxx VMESS_UUID=yyy                    # 用户 UUID
   DOMAIN=www.bing.com                        # TLS 域名 / SNI
   VLESS_PATH=/vless VMESS_PATH=/vmess        # WS 路径
@@ -735,8 +768,7 @@ main() {
     install)
       check_os
       check_deps
-
-      [[ "$PORT" != "$VMESS_PORT" ]] || die "VLESS 与 VMess 不能用同一个端口 (sing-box 每端口只能一个入站), 请设置 VMESS_PORT"
+      resolve_ports
 
       if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         info "检测到 ${SERVICE_NAME} 正在运行, 先停止..."

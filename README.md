@@ -81,9 +81,155 @@ bash singbox_mt.sh uninstall   # 卸载（KEEP_CONFIG=1 可保留配置）
 bash singbox_mt.sh help        # 查看帮助
 ```
 
+## 其他协议脚本
+
+除 MTPROXY 外，仓库还提供四个独立脚本。骨架与 `singbox_mt.sh` 一致（下载 sing-box-extended → SHA256 校验 → 写配置并 `sing-box check` → 注册服务 → 放行防火墙 → 输出客户端链接），差别只在协议入站配置。
+
+| 脚本 | 协议 | 默认端口 | 输出链接 |
+|---|---|---|---|
+| `singbox_ssr.sh` | Shadowsocks `aes-256-gcm` | `8388`（TCP+UDP） | `ss://` |
+| `singbox_hy2.sh` | Hysteria2（QUIC） | `443/udp` | `hysteria2://` |
+| `singbox_tuic.sh` | TUIC v5（QUIC） | `443/udp` | `tuic://` |
+| `singbox_vless_vmess.sh` | VLESS + VMess（TLS+WS） | `8989` + `8990` | `vless://`、`vmess://` |
+
+四个脚本都支持 `install`（默认）/ `info` / `uninstall` / `help`，也可一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | sudo bash
+curl -fsSL .../singbox_hy2.sh | sudo bash -s -- info
+curl -fsSL .../singbox_hy2.sh | sudo bash -s -- uninstall
+```
+
+> 这四个脚本目前用 **systemd** 托管，仅支持 Debian / Ubuntu 系；Alpine / OpenRC 支持目前只在 `singbox_mt.sh` 上实现。
+
+### singbox_ssr.sh — Shadowsocks
+
+一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_ssr.sh | sudo bash
+```
+
+> sing-box 没有实现 ShadowsocksR（SSR）协议，本脚本部署的是 **Shadowsocks AEAD `aes-256-gcm`**。客户端请选择 "Shadowsocks"，不要选 "ShadowsocksR"。
+
+单端口 TCP + UDP，输出 SIP002 格式的 `ss://` 链接（`base64url(method:password)@ip:port`）。
+
+```bash
+sudo bash singbox_ssr.sh
+sudo PORT=8443 PASSWORD=mypass bash singbox_ssr.sh
+```
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PORT` | `8388` | 监听端口（TCP + UDP） |
+| `PASSWORD` | 随机 | 连接密码（16 字节 base64url） |
+| `METHOD` | `aes-256-gcm` | 加密方式 |
+| `SERVER_ADDR` | 自动探测 | 对外 IP |
+
+### singbox_hy2.sh — Hysteria2
+
+一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_hy2.sh | sudo bash
+```
+
+QUIC（UDP）入站，自签 TLS 证书 + 可选 salamander 混淆，并带一个伪装站点（`masquerade`）用于抵抗探测。
+
+```bash
+sudo bash singbox_hy2.sh
+sudo PORT=8443 DOMAIN=www.bing.com bash singbox_hy2.sh
+sudo OBFS=myobfs bash singbox_hy2.sh        # 开启 salamander 混淆
+```
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PORT` | `443` | 监听端口（UDP） |
+| `PASSWORD` | 随机 | 认证密码 |
+| `DOMAIN` | 随机 | TLS 域名 / SNI |
+| `OBFS` | 空 | salamander 混淆密码，空则不启用 |
+| `CERT_FILE` / `KEY_FILE` | `/etc/sing-box/cert.pem`、`key.pem` | 不存在则自签 |
+
+生成的链接形如：
+
+```
+hysteria2://PASSWORD@1.2.3.4:443/?sni=www.bing.com&insecure=1#hy2-443
+```
+
+自签证书必须让客户端跳过校验（`insecure` / `allowInsecure`）。想用正规证书，把 `CERT_FILE` / `KEY_FILE` 指向已有文件即可。
+
+### singbox_tuic.sh — TUIC v5
+
+一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_tuic.sh | sudo bash
+```
+
+QUIC（UDP）入站，默认 BBR 拥塞控制，UUID + 密码双认证，同样支持自签或复用已有证书。
+
+```bash
+sudo bash singbox_tuic.sh
+sudo CONGESTION=cubic bash singbox_tuic.sh
+```
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PORT` | `443` | 监听端口（UDP） |
+| `UUID` | 随机 | 用户 UUID |
+| `PASSWORD` | 随机 | 认证密码 |
+| `DOMAIN` | 随机 | TLS 域名 / SNI |
+| `CONGESTION` | `bbr` | 拥塞控制（`bbr` / `cubic` / `new_reno`） |
+| `CERT_FILE` / `KEY_FILE` | 同 hy2 | 不存在则自签 |
+
+生成的链接形如：
+
+```
+tuic://UUID:PASSWORD@1.2.3.4:443?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=www.bing.com&allow_insecure=1#tuic-443
+```
+
+### singbox_vless_vmess.sh — VLESS + VMess
+
+一行部署：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_vless_vmess.sh | sudo bash
+```
+
+VLESS 与 VMess 都走 **TLS + WebSocket**，路径分别是 `/vless` 和 `/vmess`。
+
+> sing-box 的一个端口只能挂一个协议入站，所以两个协议用两个端口。**端口分配规则**：指定 `PORT` 时 VLESS 用 `PORT`、VMess 自动用 `PORT+1`（如 `PORT=443` → `443` + `444`）；都不指定时用 `8989` + `8990`；`VMESS_PORT` 可单独覆盖 VMess 端口。如果一定要单端口，需要前面再挂 nginx/caddy 按 WS 路径分流，本脚本不做这层。
+
+```bash
+sudo bash singbox_vless_vmess.sh              # 8989 + 8990
+sudo PORT=443 bash singbox_vless_vmess.sh     # 443  + 444
+sudo PORT=443 VMESS_PORT=8443 bash singbox_vless_vmess.sh   # 443 + 8443
+```
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PORT` | `8989` | VLESS 端口 |
+| `VMESS_PORT` | `PORT+1`（`PORT` 未指定时为 `8990`） | VMess 端口，显式指定时优先 |
+| `UUID` / `VMESS_UUID` | 随机 | 各自的用户 UUID |
+| `DOMAIN` | 随机 | TLS 域名 / SNI |
+| `VLESS_PATH` / `VMESS_PATH` | `/vless`、`/vmess` | WS 路径 |
+| `CERT_FILE` / `KEY_FILE` | 同 hy2 | 不存在则自签 |
+
+输出两条链接：
+
+```
+vless://UUID@1.2.3.4:8989?encryption=none&security=tls&sni=www.bing.com&fp=chrome&type=ws&host=www.bing.com&path=%2Fvless&allowInsecure=1#vless-8989
+
+vmess://eyJ2IjoiMiIsInBzIjoi...
+```
+
+客户端记得打开「允许不安全证书」。
+
 ## 部署后
 
 服务名统一为 `singbox-mt`，但管理命令按系统不同：
+
+> 其他协议脚本的服务名分别是 `singbox-ssr` / `singbox-hy2` / `singbox-tuic` / `singbox-vless`，把下面命令里的 `singbox-mt` 换掉即可。
 
 **Debian（systemd）**
 
