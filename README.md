@@ -87,7 +87,13 @@ sudo bash singbox_all.sh uninstall          # 卸载
 
 其他要求：root 权限。RHEL 系注意：CentOS 7 已 EOL，官方源迁移到 vault 后需自行修源才能补装依赖；SELinux 为 Enforcing 时服务由 systemd 以 root 运行通常不受影响。
 
-> **Alpine 用户注意**：Alpine 默认没有 bash。脚本第一行是 `#!/usr/bin/env bash`，所以必须用 `bash singbox_mt.sh` 调用（脚本会自动 `apk add bash`），不能直接 `./singbox_mt.sh`，也不能用 `sh` 执行。
+> **Alpine 用户注意**：Alpine 默认没有 bash，也没有 sudo。脚本必须用 bash 执行（不能 `sh`、不能 `./`），所以首次运行前先补上 bash；Alpine 默认以 root 登录，首次**去掉 `sudo`**（此时 sudo 还没装、`curl | sudo bash` 会报 `sudo: not found`）：
+>
+> ```bash
+> apk add -U bash && curl -fsSL -H 'Cache-Control: no-cache' https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_all.sh | bash
+> ```
+>
+> 脚本运行中会自动补装 sudo，之后的命令就可以正常带 `sudo` 了。
 
 ## 用法
 

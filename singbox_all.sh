@@ -306,6 +306,10 @@ check_deps() {
   if [[ "$OS_FAMILY" == "alpine" ]] && ! command -v curl >/dev/null 2>&1; then
     pkgs+=(curl)
   fi
+  # Alpine 默认不带 sudo, 补上以便后续用 curl | sudo bash 这类命令
+  if [[ "$OS_FAMILY" == "alpine" ]] && ! command -v sudo >/dev/null 2>&1; then
+    pkgs+=(sudo)
+  fi
   command -v python3 >/dev/null 2>&1 || need_py=1
 
   if ((${#pkgs[@]})); then
