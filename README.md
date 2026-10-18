@@ -23,6 +23,10 @@ https://t.me/proxy?server=1.2.3.4&port=443&secret=ee13c2...777772e636c6f7564666c
 一条命令装齐 **5 个协议服务端**，架构是**单进程 + 单合并配置**：只运行一个 sing-box 进程、注册一个服务 `singbox-all`，全部入站挂在同一份 `/etc/sing-box/all.json` 里（分发与运行都只有这一个脚本文件）：
 
 ```bash
+# 一键运行
+curl -fsSL -H 'Cache-Control: no-cache' https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/singbox_all.sh | sudo bash
+
+# 本地执行
 sudo bash singbox_all.sh
 ```
 
