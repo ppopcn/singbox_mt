@@ -100,6 +100,12 @@ PORT_TTY="${PORT_TTY:-/dev/tty}"
 PORT_BLOCKLIST="22 25 53 80 110 143 443 465 587 993 995 1080 2049 3306 \
 3389 5432 5900 6379 8080 8443 8888 9090 11211 27017"
 
+# all-in-one 场景: 其他协议计划使用的端口, 自动挑端口时一并避开
+PORT_EXTRA_BLOCKLIST="${PORT_EXTRA_BLOCKLIST:-}"
+
+# 依赖是否已就绪(all-in-one 多协议循环只装一次)
+DEPS_READY=0
+
 RAW_URL="https://raw.githubusercontent.com/ppopcn/singbox_mt/refs/heads/main/${RAW_FILE}"
 
 DEFAULT_DOMAINS=(
@@ -142,6 +148,11 @@ check_root() {
 
 # 识别发行版族与 init 系统, 后续平台相关操作都据此分流
 detect_platform() {
+  # 已检测过则直接返回(all-in-one 多协议循环只检测一次; SERVICE_FILE 由调用方刷新)
+  if [[ -n "$OS_FAMILY" ]]; then
+    return 0
+  fi
+
   local id="" id_like="" pretty=""
 
   if [[ -r /etc/os-release ]]; then
@@ -156,11 +167,15 @@ detect_platform() {
       OS_FAMILY="alpine" ;;
     debian|ubuntu|linuxmint|pop|raspbian|armbian|kali|devuan|neon|elementary)
       OS_FAMILY="debian" ;;
+    centos|rhel|rocky|almalinux|fedora|anolis|openeuler|opencloudos|tencentos|kylin)
+      OS_FAMILY="rhel" ;;
     *)
       if [[ "$id_like" == *alpine* ]]; then
         OS_FAMILY="alpine"
       elif [[ "$id_like" == *debian* || "$id_like" == *ubuntu* ]]; then
         OS_FAMILY="debian"
+      elif [[ "$id_like" == *rhel* || "$id_like" == *fedora* || "$id_like" == *centos* ]]; then
+        OS_FAMILY="rhel"
       else
         OS_FAMILY="unknown"
       fi
@@ -173,10 +188,14 @@ detect_platform() {
       SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
       ok "系统: ${pretty:-Alpine Linux} (Alpine 系 / OpenRC)"
       ;;
-    debian)
+    debian|rhel)
       INIT_SYSTEM="systemd"
       SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-      ok "系统: ${pretty:-Debian} (Debian 系 / systemd)"
+      if [[ "$OS_FAMILY" == "rhel" ]]; then
+        ok "系统: ${pretty:-RHEL 系} (RHEL 系 / systemd)"
+      else
+        ok "系统: ${pretty:-Debian} (Debian 系 / systemd)"
+      fi
       ;;
     *)
       if command -v apk >/dev/null 2>&1; then
@@ -187,15 +206,28 @@ detect_platform() {
         OS_FAMILY="debian"; INIT_SYSTEM="systemd"
         SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
         warn "系统 ${pretty:-unknown} 未识别, 检测到 apt-get, 按 Debian/systemd 处理"
+      elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        OS_FAMILY="rhel"; INIT_SYSTEM="systemd"
+        SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+        warn "系统 ${pretty:-unknown} 未识别, 检测到 dnf/yum, 按 RHEL/systemd 处理"
       else
-        die "无法识别的系统 (${pretty:-unknown}), 仅支持 Debian 系与 Alpine"
+        die "无法识别的系统 (${pretty:-unknown}), 仅支持 Debian 系 / RHEL 系与 Alpine"
       fi
       ;;
   esac
 
   case "$INIT_SYSTEM" in
     systemd)
-      command -v systemctl >/dev/null 2>&1 || die "未找到 systemctl, 无法用 systemd 托管服务"
+      # 无 systemd 的衍生系统(如 Devuan)回退 OpenRC
+      if ! command -v systemctl >/dev/null 2>&1; then
+        if command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
+          warn "未找到 systemctl, 改用 OpenRC 托管服务"
+          INIT_SYSTEM="openrc"
+          SERVICE_FILE="/etc/init.d/${SERVICE_NAME}"
+        else
+          die "未找到 systemctl 且无 OpenRC, 无法托管服务"
+        fi
+      fi
       ;;
     openrc)
       command -v rc-service >/dev/null 2>&1 || {
@@ -211,18 +243,21 @@ detect_platform() {
 check_os() { detect_platform; }
 
 check_deps() {
-  local pkgs=() need_curl=0
+  ((DEPS_READY)) && return 0
+  local pkgs=() need_curl=0 need_py=0
   command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || need_curl=1
   command -v tar  >/dev/null 2>&1 || pkgs+=(tar)
   command -v ss   >/dev/null 2>&1 || pkgs+=(iproute2)
-  ((NEED_CERT)) && { command -v openssl >/dev/null 2>&1 || pkgs+=(openssl); }
-
+  if ((NEED_CERT)) && ! command -v openssl >/dev/null 2>&1; then
+    pkgs+=(openssl)
+  fi
   if ((need_curl)); then
     pkgs+=(curl)
   fi
   if [[ "$OS_FAMILY" == "alpine" ]] && ! command -v curl >/dev/null 2>&1; then
     pkgs+=(curl)
   fi
+  command -v python3 >/dev/null 2>&1 || need_py=1
 
   if ((${#pkgs[@]})); then
     local uniq
@@ -239,11 +274,46 @@ check_deps() {
         # shellcheck disable=SC2086
         apt-get install -y -qq $uniq >/dev/null || die "依赖安装失败"
         ;;
+      rhel)
+        if command -v dnf >/dev/null 2>&1; then
+          # shellcheck disable=SC2086
+          dnf install -y -q $uniq >/dev/null || die "dnf install 失败"
+        elif command -v yum >/dev/null 2>&1; then
+          # shellcheck disable=SC2086
+          yum install -y -q $uniq >/dev/null || die "yum install 失败"
+        else
+          die "未找到 dnf / yum, 无法自动安装依赖"
+        fi
+        ;;
       *)
         die "未知发行版, 无法自动安装依赖: ${pkgs[*]}"
         ;;
     esac
   fi
+
+  # python3 只影响增强功能(重装复用凭据 / Release 资产精确匹配), 尽力安装不阻塞
+  if ((need_py)); then
+    info "安装依赖: python3 (可选, JSON 解析)"
+    case "$OS_FAMILY" in
+      alpine)
+        apk add --no-cache python3 >/dev/null 2>&1 || true
+        ;;
+      debian)
+        apt-get install -y -qq python3 >/dev/null 2>&1 || true
+        ;;
+      rhel)
+        if command -v dnf >/dev/null 2>&1; then
+          dnf install -y -q python3 >/dev/null 2>&1 || true
+        elif command -v yum >/dev/null 2>&1; then
+          yum install -y -q python3 >/dev/null 2>&1 || true
+        fi
+        ;;
+    esac
+    command -v python3 >/dev/null 2>&1 \
+      || warn "python3 不可用: 全新安装不受影响, 但重装时无法复用旧凭据"
+  fi
+
+  DEPS_READY=1
   ok "依赖就绪"
 }
 
@@ -850,7 +920,7 @@ PY
 pick_free_port() {
   local proto="$1"; shift
   local i p used skip
-  used=" $(singbox_ports | tr '\n' ' ') $* "
+  used=" $(singbox_ports | tr '\n' ' ') $* ${PORT_EXTRA_BLOCKLIST} "
   for i in $(seq 1 300); do
     p=$(( (RANDOM * 32768 + RANDOM) % (PORT_RANDOM_TO - PORT_RANDOM_FROM + 1) + PORT_RANDOM_FROM ))
     if ((p < 1024)); then
@@ -1027,28 +1097,87 @@ port_summary() {
   printf '%s' "${out% }"
 }
 
+# iptables 规则是否有改动(用于决定是否做持久化)
+FW_IPTABLES_DIRTY=0
+
+# 综合处理各发行版的防火墙: ufw / firewalld / iptables(含 Alpine) / nftables
+# 端口来源: PORT_SPECS ("变量名:tcp" / "变量名:udp" / "变量名:tcp,udp")
 open_firewall() {
-  local spec name proto p
+  local spec name proto p handled policy rule_p
+  FW_IPTABLES_DIRTY=0
+
   for spec in "${PORT_SPECS[@]}"; do
     name="${spec%%:*}"; proto="${spec#*:}"
-    for p in ${proto//,/ }; do
-      if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-        ufw allow "${!name}/${p}" >/dev/null 2>&1 \
-          && ok "ufw 已放行 ${!name}/${p}" || warn "ufw 放行失败"
+
+    # ---- ufw (Debian/Ubuntu 常见) ----
+    handled=0
+    if command -v ufw >/dev/null 2>&1; then
+      if ufw status 2>/dev/null | grep -q "Status: active"; then
+        for up in ${proto//,/ }; do
+          ufw allow "${!name}/${up}" >/dev/null 2>&1 \
+            && ok "ufw 已放行 ${!name}/${up}" || warn "ufw 放行失败: ${!name}/${up}"
+        done
+        handled=1
       fi
-      if command -v firewall-cmd >/dev/null 2>&1 \
-        && systemctl is-active --quiet firewalld 2>/dev/null; then
-        firewall-cmd --permanent --add-port="${!name}/${p}" >/dev/null 2>&1 || true
+    fi
+
+    # ---- firewalld (RHEL 系常见) ----
+    if command -v firewall-cmd >/dev/null 2>&1; then
+      if systemctl is-active --quiet firewalld 2>/dev/null; then
+        for fp in ${proto//,/ }; do
+          firewall-cmd --permanent --add-port="${!name}/${fp}" >/dev/null 2>&1 || true
+          ok "firewalld 已放行 ${!name}/${fp}"
+        done
         firewall-cmd --reload >/dev/null 2>&1 || true
-        ok "firewalld 已放行 ${!name}/${p}"
+        handled=1
+      else
+        warn "firewalld 已安装但未运行: 若日后启用, 记得放行 ${!name}/${proto}"
       fi
-      if [[ "$OS_FAMILY" == "alpine" ]] && command -v iptables >/dev/null 2>&1; then
-        if iptables -S INPUT 2>/dev/null | head -n1 | grep -q '\-P INPUT DROP'; then
-          warn "INPUT 默认 DROP, 需手动放行: iptables -A INPUT -p ${p} --dport ${!name} -j ACCEPT"
-        fi
+    fi
+
+    # ---- iptables (Alpine / 无 ufw/firewalld 的精简系统) ----
+    if (( ! handled )) && command -v iptables >/dev/null 2>&1; then
+      policy="$(iptables -S INPUT 2>/dev/null | head -n1)"
+      if [[ "$policy" == *"-P INPUT DROP"* || "$policy" == *"-P INPUT REJECT"* ]]; then
+        for rule_p in ${proto//,/ }; do
+          if iptables -C INPUT -p "$rule_p" --dport "${!name}" -j ACCEPT >/dev/null 2>&1; then
+            continue
+          fi
+          if iptables -I INPUT -p "$rule_p" --dport "${!name}" -j ACCEPT >/dev/null 2>&1; then
+            ok "iptables 已放行 ${!name}/${rule_p} (INPUT 默认 ${policy#*-P INPUT }, 已插入 ACCEPT)"
+            FW_IPTABLES_DIRTY=1
+          else
+            warn "iptables 放行失败: ${!name}/${rule_p}, 请手动执行: iptables -I INPUT -p ${rule_p} --dport ${!name} -j ACCEPT"
+          fi
+        done
+      else
+        info "iptables INPUT 默认 ACCEPT, 无需额外放行 ${!name}/${proto}"
       fi
-    done
+    elif (( ! handled )) && command -v nft >/dev/null 2>&1; then
+      warn "检测到 nftables: 若入站默认丢弃, 请放行 ${!name}/${proto}"
+    fi
   done
+
+  # ---- iptables 规则持久化(尽力而为) ----
+  if ((FW_IPTABLES_DIRTY)); then
+    if [[ "$OS_FAMILY" == "alpine" ]] && command -v iptables-save >/dev/null 2>&1; then
+      mkdir -p /etc/iptables 2>/dev/null || true
+      if iptables-save >/etc/iptables/rules-save 2>/dev/null \
+        && rc-update add iptables default >/dev/null 2>&1; then
+        ok "iptables 规则已保存(/etc/iptables/rules-save), 开机自动恢复"
+      else
+        warn "iptables 规则未能持久化, 重启后需重新放行"
+      fi
+    elif command -v netfilter-persistent >/dev/null 2>&1; then
+      netfilter-persistent save >/dev/null 2>&1 \
+        && ok "iptables 规则已由 netfilter-persistent 保存" \
+        || warn "iptables 规则保存失败, 重启后需重新放行"
+    else
+      warn "iptables 规则未持久化: 可安装 iptables-persistent(Debian) 或自行 iptables-save"
+    fi
+  fi
+
+  warn "云服务器安全组不归本脚本管, 以上端口需在控制台手动放行"
 }
 
 # ---------------------------------------------------------------- 启动 ------

@@ -1,6 +1,6 @@
 # singbox_mt
 
-在 Debian / Ubuntu / Alpine 上**一键部署 MTPROXY 服务端**的 Shell 脚本，基于 [shtorm-7/sing-box-extended](https://github.com/shtorm-7/sing-box-extended)（sing-box 的增强分支）。
+在 Debian / Ubuntu / CentOS 等 RHEL 系 / Alpine 上**一键部署 sing-box 服务端**的 Shell 脚本，基于 [shtorm-7/sing-box-extended](https://github.com/shtorm-7/sing-box-extended)（sing-box 的增强分支）。
 
 运行一条命令，脚本会自动完成：识别发行版与架构 → 复用或下载官方预编译二进制 → 生成 FakeTLS secret → 写配置 → 注册服务 → 启动 → 输出 Telegram 代理链接。
 
@@ -18,6 +18,51 @@ https://t.me/proxy?server=1.2.3.4&port=443&secret=ee13c2...777772e636c6f7564666c
 
 把这个链接发给 Telegram 联系人，或直接在手机浏览器打开，即可导入代理。
 
+## 一键全家桶：singbox_all.sh
+
+一条命令装齐 **5 个协议服务端**，架构是**单进程 + 单合并配置**：只运行一个 sing-box 进程、注册一个服务 `singbox-all`，全部入站挂在同一份 `/etc/sing-box/all.json` 里（分发与运行都只有这一个脚本文件）：
+
+```bash
+sudo bash singbox_all.sh
+```
+
+默认端口计划（443 的 TCP 与 UDP 互不冲突，分别给 MT 与 HY2；TUIC 是 QUIC，让出 443 用 8443）：
+
+| 协议 | 默认端口 | 说明 |
+|---|---|---|
+| MTPROXY | `443/tcp` | TCP 443 伪装最佳 |
+| Hysteria2 | `443/udp` | QUIC 443 伪装最佳 |
+| TUIC v5 | `8443/udp` | BBR 拥塞控制 |
+| Shadowsocks | `8388/tcp+udp` | aes-256-gcm |
+| VLESS / VMess | `8989` / `8990` tcp | TLS + WS |
+
+```bash
+sudo PROTOCOLS=mt,hy2 bash singbox_all.sh   # 只启用指定协议 (mt hy2 tuic ssr vless)
+sudo bash singbox_all.sh plan               # 只打印/校验端口计划，不安装
+sudo bash singbox_all.sh status             # 服务状态与端口
+sudo bash singbox_all.sh info               # 重新打印全部凭据与链接
+sudo bash singbox_all.sh logs [N]           # 最近 N 行日志
+sudo bash singbox_all.sh uninstall          # 卸载
+```
+
+端口用专用变量覆盖（显式指定才生效，重装未指定则沿用上次实际端口）：
+`MT_PORT` / `HY2_PORT` / `TUIC_PORT` / `SSR_PORT` / `VLESS_PORT` / `VMESS_PORT`。
+凭据变量按协议加前缀：`HY2_PASSWORD`、`TUIC_UUID`、`SSR_PASSWORD`、`VLESS_UUID`…，
+`DOMAIN` 为全部 TLS 协议共用的 SNI。装前会统一校验端口计划，互相打架直接报错；
+冲突自动挑端口时也会避开其他协议计划使用的端口。重装会从合并配置里按入站类型复用全部凭据，客户端不会失效。
+
+> **hy2 与 TUIC 都要 443 怎么办？** 两个都装、错开端口即可：TCP 443 与 UDP 443 是两个独立端口。MT 占 TCP 443，HY2 占 UDP 443，TUIC 用 8443——不想要的协议用 `PROTOCOLS=` 去掉就行。
+
+**跨系统与防火墙/服务托管**，脚本统一处理：
+
+| 系统 | 包管理 | 服务托管 | 防火墙处理 |
+|---|---|---|---|
+| Debian / Ubuntu | `apt` | systemd（`systemctl enable` 自启） | ufw 活跃则放行；iptables INPUT 默认 DROP 时自动插入 ACCEPT |
+| CentOS / Rocky / Alma / Fedora | `dnf`/`yum` | systemd | firewalld 活跃则 `--permanent` 放行并 reload；未运行则提示 |
+| Alpine | `apk` | OpenRC（`rc-update add default` 自启，容器内自动补 softlevel 标记） | iptables 放行并 `iptables-save` 持久化 + 开机恢复 |
+
+无论哪种系统，**云厂商安全组都需要在控制台手动放行端口**。旧版按协议拆分的 5 个服务（singbox-mt/hy2/…）会在安装时被自动迁移为单一 `singbox-all`。
+
 ## 为什么用它
 
 官方 sing-box 没有 MTPROXY 入站。这个脚本用的是 `sing-box-extended`，它额外提供了 `mtproxy` 入站（底层是 [mtg-multi](https://github.com/dolonet/mtg-multi) 内核），同时保留了 sing-box 全套路由与出站能力。
@@ -28,15 +73,15 @@ https://t.me/proxy?server=1.2.3.4&port=443&secret=ee13c2...777772e636c6f7564666c
 
 脚本会自动识别发行版族，走对应的包管理与服务管理路径。
 
-| 项目 | Debian 系 | Alpine 系 |
-|---|---|---|
-| 发行版 | Debian 10+ / Ubuntu 18.04+ / 衍生版 | Alpine 3.16+ |
-| 包管理 | `apt` | `apk` |
-| 服务管理 | `systemd` | `OpenRC` |
-| 自动补装依赖 | curl、tar、iproute2 | bash、curl、openrc、iproute2 |
-| 架构 | amd64 / arm64 / armv7 / armv6 / 386 / riscv64 / loong64 / mips 系列 | 同左 |
+| 项目 | Debian 系 | RHEL 系 | Alpine 系 |
+|---|---|---|---|
+| 发行版 | Debian 10+ / Ubuntu 18.04+ / 衍生版 | CentOS 7+ / Rocky / Alma / Fedora 等 | Alpine 3.16+ |
+| 包管理 | `apt` | `dnf` / `yum` | `apk` |
+| 服务管理 | `systemd` | `systemd` | `OpenRC` |
+| 自动补装依赖 | curl、tar、iproute2 | 同左（python3 尽力补装） | bash、curl、openrc、iproute2 |
+| 架构 | amd64 / arm64 / armv7 / armv6 / 386 / riscv64 / loong64 / mips 系列 | 同左 | 同左 |
 
-其他要求：root 权限。
+其他要求：root 权限。RHEL 系注意：CentOS 7 已 EOL，官方源迁移到 vault 后需自行修源才能补装依赖；SELinux 为 Enforcing 时服务由 systemd 以 root 运行通常不受影响。
 
 > **Alpine 用户注意**：Alpine 默认没有 bash。脚本第一行是 `#!/usr/bin/env bash`，所以必须用 `bash singbox_mt.sh` 调用（脚本会自动 `apk add bash`），不能直接 `./singbox_mt.sh`，也不能用 `sh` 执行。
 
@@ -121,6 +166,7 @@ singbox-tuic uninstall
 
 | 脚本 | 协议 | 默认端口 | 输出链接 |
 |---|---|---|---|
+| `singbox_all.sh` | **全部 5 个协议一次装** | 见上文全家桶端口表 | 各协议链接 |
 | `singbox_ssr.sh` | Shadowsocks `aes-256-gcm` | `8388`（TCP+UDP） | `ss://` |
 | `singbox_hy2.sh` | Hysteria2（QUIC） | `443/udp` | `hysteria2://` |
 | `singbox_tuic.sh` | TUIC v5（QUIC） | `443/udp` | `tuic://` |
@@ -273,7 +319,7 @@ singbox_*.sh              构建产物（仓库根目录，也就是 curl 直接
 **根目录的 `singbox_*.sh` 不要直接改**，改完 `src/` 或 `lib/` 后重新生成：
 
 ```bash
-./build.sh            # 生成 5 个脚本
+./build.sh            # 生成 6 个脚本
 ./build.sh --check    # 只检查产物是否最新（CI 用）
 ```
 
