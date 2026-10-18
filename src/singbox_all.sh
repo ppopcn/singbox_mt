@@ -719,54 +719,91 @@ _vmess_link() {
 }
 
 # ---------------------------------------------------------------- 输出 ------
+# 协议小节标题: ── [N] 名称 · 监听 ──────────
+_sec_head() { # $1=序号 $2=名称 $3=监听描述
+  printf '\n  %s── %s %s ─────────────────────────────%s\n' \
+    "$C_BLD$C_BLU" "$1" "$2" "$C_RST"
+  printf '  监听 : %s%s%s\n' "$C_YEL" "$3" "$C_RST"
+}
+
+_link_line() { printf '  链接 : %s%s%s\n' "$C_GRN" "$1" "$C_RST"; }
+
 print_summary_all() {
-  local server="$1"
+  local server="$1" r _n _l _d
+  local rows=()
 
   echo
-  hr
-  printf '%s  sing-box All-in-One 部署完成%s\n' "$C_BLD$C_GRN" "$C_RST"
-  hr
-  printf '  服务器 IP   : %s\n' "$server"
-  printf '  配置文件    : %s (单文件含全部入站)\n' "$CONFIG_FILE"
-  printf '  二进制      : %s\n' "$BIN_PATH"
-  printf '  服务名      : %s (单进程)\n' "$SERVICE_NAME"
-  printf '  初始化系统  : %s\n' "$INIT_SYSTEM"
+  printf '  %s============================================================%s\n' "$C_BLD$C_BLU" "$C_RST"
+  printf '   %s sing-box All-in-One 部署完成 %s\n' "$C_BLD$C_GRN" "$C_RST"
+  printf '  %s============================================================%s\n' "$C_BLD$C_BLU" "$C_RST"
+
+  # ---- 服务器信息 ----
+  printf '\n  %s▍服务器信息%s\n' "$C_BLD$C_YEL" "$C_RST"
+  printf '  服务器 IP     : %s%s%s\n' "$C_BLD" "$server" "$C_RST"
+  printf '  配置文件      : %s (单文件含全部入站)\n' "$CONFIG_FILE"
+  printf '  二进制        : %s\n' "$BIN_PATH"
+  printf '  服务名        : %s (单进程)\n' "$SERVICE_NAME"
+  printf '  初始化系统    : %s\n' "$INIT_SYSTEM"
   if want_proto hy2 || want_proto tuic || want_proto vless; then
-    printf '  证书        : %s (自签, 客户端需跳过校验)\n' "$CERT_FILE"
-    printf '  SNI / 域名  : %s\n' "$DOMAIN"
+    printf '  证书          : %s (自签, 客户端需跳过校验)\n' "$CERT_FILE"
+    printf '  SNI / 域名    : %s\n' "$DOMAIN"
   fi
-  echo
 
+  # ---- 入站总览表 ----
+  if want_proto mt;    then rows+=("MTPROXY|${MT_PORT}/tcp|FakeTLS 伪装"); fi
+  if want_proto hy2;   then rows+=("Hysteria2|${HY2_PORT}/udp|QUIC"); fi
+  if want_proto tuic;  then rows+=("TUIC v5|${TUIC_PORT}/udp|QUIC + BBR"); fi
+  if want_proto ssr;   then rows+=("Shadowsocks|${SSR_PORT}/tcp+udp|AEAD 加密"); fi
+  if want_proto vless; then
+    rows+=("VLESS|${VLESS_PORT}/tcp|TLS + WS")
+    rows+=("VMess|${VMESS_PORT}/tcp|TLS + WS")
+  fi
+
+  printf '\n  %s▍入站总览%s\n' "$C_BLD$C_YEL" "$C_RST"
+  printf '  协议            监听端口       说明\n'
+  printf '  %s\n' "────────────────────────────────────────────"
+  for r in "${rows[@]}"; do
+    IFS='|' read -r _n _l _d <<<"$r"
+    printf '  %-15s %-14s %s\n' "$_n" "$_l" "$_d"
+  done
+
+  # ---- 各协议凭据与链接 ----
+  printf '\n  %s▍连接信息%s\n' "$C_BLD$C_YEL" "$C_RST"
   if want_proto mt; then
-    printf '  %sMTPROXY%s  %s/tcp\n' "$C_BLD" "$C_RST" "$MT_PORT"
-    printf '    %s\n' "$(_mt_link "$server")"
+    _sec_head "[1]" "MTPROXY" "${MT_PORT}/tcp"
+    _link_line "$(_mt_link "$server")"
   fi
   if want_proto hy2; then
-    printf '  %sHysteria2%s  %s/udp  密码: %s%s\n' \
-      "$C_BLD" "$C_RST" "$HY2_PORT" "$HY2_PASSWORD" \
-      "$( [[ -n "$HY2_OBFS" ]] && printf '  混淆: %s' "$HY2_OBFS" )"
-    printf '    %s\n' "$(_hy2_link "$server")"
+    _sec_head "[2]" "Hysteria2" "${HY2_PORT}/udp"
+    printf '  密码 : %s\n' "$HY2_PASSWORD"
+    [[ -n "$HY2_OBFS" ]] && printf '  混淆 : salamander / %s\n' "$HY2_OBFS"
+    _link_line "$(_hy2_link "$server")"
   fi
   if want_proto tuic; then
-    printf '  %sTUIC v5%s  %s/udp  UUID: %s  密码: %s\n' \
-      "$C_BLD" "$C_RST" "$TUIC_PORT" "$TUIC_UUID" "$TUIC_PASSWORD"
-    printf '    %s\n' "$(_tuic_link "$server")"
+    _sec_head "[3]" "TUIC v5" "${TUIC_PORT}/udp"
+    printf '  UUID : %s\n' "$TUIC_UUID"
+    printf '  密码 : %s\n' "$TUIC_PASSWORD"
+    _link_line "$(_tuic_link "$server")"
   fi
   if want_proto ssr; then
-    printf '  %sShadowsocks%s  %s/tcp+udp  加密: %s  密码: %s\n' \
-      "$C_BLD" "$C_RST" "$SSR_PORT" "$SSR_METHOD" "$SSR_PASSWORD"
-    printf '    %s\n' "$(_ssr_link "$server")"
+    _sec_head "[4]" "Shadowsocks" "${SSR_PORT}/tcp+udp"
+    printf '  加密 : %s\n' "$SSR_METHOD"
+    printf '  密码 : %s\n' "$SSR_PASSWORD"
+    _link_line "$(_ssr_link "$server")"
   fi
   if want_proto vless; then
-    printf '  %sVLESS%s  %s/tcp  WS 路径: %s\n' "$C_BLD" "$C_RST" "$VLESS_PORT" "$VLESS_PATH"
-    printf '    %s\n' "$(_vless_link "$server")"
-    printf '  %sVMess%s  %s/tcp  WS 路径: %s\n' "$C_BLD" "$C_RST" "$VMESS_PORT" "$VMESS_PATH"
-    printf '    %s\n' "$(_vmess_link "$server")"
+    _sec_head "[5]" "VLESS" "${VLESS_PORT}/tcp"
+    printf '  UUID : %s    WS 路径: %s\n' "$VLESS_UUID" "$VLESS_PATH"
+    _link_line "$(_vless_link "$server")"
+    _sec_head "[6]" "VMess" "${VMESS_PORT}/tcp"
+    printf '  UUID : %s    WS 路径: %s\n' "$VMESS_UUID" "$VMESS_PATH"
+    _link_line "$(_vmess_link "$server")"
   fi
 
-  echo
-  printf '  客户端记得开启 "允许不安全证书 / allowInsecure" (TLS 协议)。\n'
-  printf '  Shadowsocks 客户端请选 "Shadowsocks", 不是 "ShadowsocksR"。\n'
+  # ---- 客户端提示 ----
+  printf '\n  %s▍客户端提示%s\n' "$C_BLD$C_YEL" "$C_RST"
+  printf '  · TLS 协议记得开启 "允许不安全证书 / allowInsecure"\n'
+  printf '  · Shadowsocks 客户端请选 "Shadowsocks", 不是 "ShadowsocksR"\n'
   print_manage_block
 }
 

@@ -1256,24 +1256,38 @@ install_self() {
 print_manage_block() {
   local cmd="singbox-${SHORT_NAME}"
   echo
-  hr
-  printf '  管理命令\n'
-  hr
+  printf '  %s━━ 管理命令 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$C_BLD$C_BLU" "$C_RST"
+  echo
+  printf '  %s· 服务管理%s\n' "$C_BLD" "$C_RST"
   case "$INIT_SYSTEM" in
     systemd)
-      printf '  systemctl status %s    查看状态\n' "$SERVICE_NAME"
-      printf '  systemctl restart %s   重启\n' "$SERVICE_NAME"
-      printf '  journalctl -u %s -f    实时日志\n' "$SERVICE_NAME"
+      printf '  %-46s %s\n' "systemctl status ${SERVICE_NAME}" "查看状态"
+      printf '  %-46s %s\n' "systemctl restart ${SERVICE_NAME}" "重启服务"
+      printf '  %-46s %s\n' "journalctl -u ${SERVICE_NAME} -f" "实时日志"
+      printf '  %-46s %s\n' "journalctl -u ${SERVICE_NAME} -n 200" "最近 200 行日志"
       ;;
     openrc)
-      printf '  rc-service %s status   查看状态\n' "$SERVICE_NAME"
-      printf '  rc-service %s restart  重启\n' "$SERVICE_NAME"
-      printf '  tail -f /var/log/%s.log 实时日志\n' "$SERVICE_NAME"
+      printf '  %-46s %s\n' "rc-service ${SERVICE_NAME} status" "查看状态"
+      printf '  %-46s %s\n' "rc-service ${SERVICE_NAME} restart" "重启服务"
+      printf '  %-46s %s\n' "tail -f /var/log/${SERVICE_NAME}.log" "实时日志"
+      printf '  %-46s %s\n' "tail -n 200 /var/log/${SERVICE_NAME}.log" "最近 200 行日志"
       ;;
   esac
-  printf '  %s info           重新打印此信息\n' "$cmd"
-  printf '  %s logs           查看最近日志\n' "$cmd"
-  printf '  %s uninstall      卸载\n' "$cmd"
+  echo
+  printf '  %s· 内置命令%s\n' "$C_BLD" "$C_RST"
+  printf '  %-46s %s\n' "${cmd} info" "重新打印凭据与链接"
+  printf '  %-46s %s\n' "${cmd} logs [N]" "最近 N 行日志"
+  printf '  %-46s %s\n' "${cmd} uninstall" "卸载"
+  echo
+  printf '  %s· 排错命令 (sing-box)%s\n' "$C_BLD" "$C_RST"
+  printf '  %-46s %s\n' "sing-box check -c ${CONFIG_FILE}" "校验配置合法性"
+  printf '  %-46s %s\n' "sing-box version" "内核版本"
+  printf '  %-46s %s\n' "ss -tlnp | grep sing-box" "TCP 监听端口"
+  printf '  %-46s %s\n' "ss -ulnp | grep sing-box" "UDP 监听端口"
+  printf '  %-46s %s\n' "python3 -m json.tool ${CONFIG_FILE}" "查看完整配置"
+  echo
+  printf '  %s提示:%s 客户端连不上时, 把 %s 里\n' "$C_YEL" "$C_RST" "$CONFIG_FILE"
+  printf '  log.level 改为 debug 再重启, 可看到握手阶段细节。\n'
   printf '  远程用法: curl -fsSL %s | sudo bash -s -- info\n' "$RAW_URL"
   echo
 }
